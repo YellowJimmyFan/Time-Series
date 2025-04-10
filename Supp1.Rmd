@@ -1,0 +1,3309 @@
+---
+title: "STAT 443 Spring 2024 Final Project Supplementary Material1"
+author: "Daolin(Chase) An"
+date: "UW ID: 20885166"
+output: 
+    pdf_document:
+      toc: true
+      latex_engine: xelatex
+      number_sections: yes
+---
+
+\newpage
+
+# Preliminary
+```{r Preliminary, message=FALSE, warning=FALSE}
+rm(list=ls())
+library(urca)
+library(MASS)
+library(astsa)
+library(fGarch)
+library(rugarch)
+library(ggplot2)
+library(forecast)
+set.seed("20885166")
+## Scenario 1 data
+data.hydro <- read.csv("hydrology_data.txt")
+## Scenario 2 data
+for (i in 1:40) {
+  stockID <- paste0("stock", i, ".txt")
+  stockVAL <- read.csv(stockID)
+  assign(paste0("data.stock", i), stockVAL)
+}
+```
+
+# Scenario 1: Hydrological Forecast
+
+## Expanding Window CV function for original scale
+```{r Expanding Window CV function}
+EWCV.SARIMA <- function(data, p, d, q, P, D, Q, S) {
+  len <- nrow(data)
+  data.train.percent <- c(0.5, 0.6, 0.7, 0.8, 0.9)
+  i <- 1
+  MSE <- c()
+  for (percent in data.train.percent) {
+    num.train <- round(len * percent)
+    num.test <- num.train + 1
+    data.train <- data$Value[1:num.train]
+    data.test <- data$Value[num.test:len]
+    len.test <- length(data.test)
+    
+    ## Change model here
+    model <- astsa::sarima(data.train, p, d, q, P, D, Q, S)
+    ## Make predictions
+    pred <- as.numeric(sarima.for(as.ts(data.train), len.test, 
+                                  p, d, q, P, D, Q, S, plot = FALSE)$pred)
+    ## Calculate MSE
+    MSE[i] <- mean((data.test - pred)^2)
+    i <- i + 1
+  }
+  return(mean(MSE))
+}
+```
+
+## Plot the original series
+```{r Scenario 1 Plot the series, fig.height=4, fig.width=6}
+data.hydro$ID <- 1:576
+ggplot(data.hydro) +
+  geom_line(aes(x = ID, y = Value), linewidth=1) +
+  ylab(NULL) + xlab(NULL) + ggtitle("Hydrological time series")
+```
+
+## ACF of the series
+```{r Scenario 1 ACF of the series, fig.height=4}
+acf(data.hydro$Value, main = "ACF of Hydrological data")
+pacf(data.hydro$Value, main = "PACF of Hydrological data")
+```
+
+**1.** Now the ACF and PACF plots of the original time series indicate that the 
+original time series is not stationary.
+
+**2.** The data also shows possible seasonal pattern cause it peaks and falls 
+regularly and frequently.
+
+**3.** Next, I will apply seasonal differencing on the data to make it more 
+stationary.
+
+**Observation:** The data contains 576 consecutive months of data which falls 
+in a 48-year period. In each year, the value of data mostly increase from 
+January(assume the first value was recorded in January) to May, peaking at May, 
+and then it decreases from May to December.
+
+Then based on the observation, I think a 12th-order difference is appropriate 
+in this case.
+
+## Difference the hydro data and plot the corresponding ACF and PACF plots
+```{r Difference the hydro data and plot P/ACF, fig.height=4}
+data.hydro.diffed <- diff(data.hydro$Value, lag = 12)
+acf(data.hydro.diffed, 60)
+pacf(data.hydro.diffed)
+```
+```{r Scenario 1 KPSS test differenced once}
+summary(ur.kpss(data.hydro.diffed))
+```
+
+The series becomes more stationary, indicated by the acf and pacf plot of the 
+data after being differenced once. (ACF values quickly drops to 0, and the pacf 
+plot shows minimal partial autocorrelations.)
+
+The KPSS test also confirms that after differencing, there is insufficient 
+evidence to reject that the differenced data is stationary.
+
+We are now ready to fit a model.
+
+## Start with a SARIMA model
+**Seasonal Component: **It appears that at the seasons, the PACF is cutting off 
+at lag 1s(s = 12). The ACF is tailing off at at lag 1s, 3s but not obvious for 
+other lags, 2s, 4s.... These results implies an SAR(1), and an SMA(1) 
+P = 1, Q = 1, in the season(s = 12).
+
+**Non-Seasonal Component: **Inspecting the sample ACF and PACF at the lower 
+lags, it appears as though both are tailing off. This suggests an ARMA(1, 1) 
+within the seasons, p = q = 1. Now since both the acf and pacf of differenced 
+data tails off, and the time series shows a general seasonal pattern, I start 
+with a SARIMA(1,1,1,1,1,1,12) model.
+```{r Scenario 1 Start with a SARIMA model}
+hydro.fit1 <- astsa::sarima(data.hydro$Value, 1, 1, 1, 1, 1, 1, 12)
+EWCV.SARIMA(data.hydro, 1, 1, 1, 1, 1, 1, 12)
+```
+**1. **Now note the p-values for Ljung-Box statistic are approximately all 
+lower than the threshold, which means model assumption are not well met(not a 
+good fit).
+
+**2. **The residuals have no observable patterns, but as can be seen from the 
+Normal Q-Q plot, they have heavier right tails – we may transform the data to 
+make the residuals more normally distributed.
+
+## Expanding Window CV function for log scale
+```{r Expanding Window CV function for log scale}
+EWCV.logSARIMA <- function(data, p, d, q, P, D, Q, S) {
+  len <- nrow(data)
+  data.train.percent <- c(0.5, 0.6, 0.7, 0.8, 0.9)
+  i <- 1
+  MSE <- c()
+  for (percent in data.train.percent) {
+    num.train <- round(len * percent)
+    num.test <- num.train + 1
+    data.train <- data$Value[1:num.train]
+    data.test <- data$Value[num.test:len]
+    len.test <- length(data.test)
+    
+    ## Change model here
+    model <- astsa::sarima(data.train, p, d, q, P, D, Q, S)
+    ## Make predictions in log scale
+    pred <- as.numeric(sarima.for(as.ts(log(data.train)), len.test, 
+                                  p, d, q, P, D, Q, S, plot = FALSE)$pred)
+    ## Calculate MSE
+    MSE[i] <- mean((data.test - exp(pred))^2)
+    i <- i + 1
+  }
+  return(mean(MSE))
+}
+```
+
+## Transform the data
+```{r Scenario1 Transform the response}
+hydro.fit2 <- astsa::sarima(log(data.hydro$Value), 1, 1, 1, 1, 1, 1, 12)
+EWCV.logSARIMA(data.hydro, 1, 1, 1, 1, 1, 1, 12)
+```
+
+## Try different orders
+```{r Scenario1 Picking different orders}
+hydro.fit3 <- astsa::sarima(log(data.hydro$Value), 3, 1, 1, 1, 1, 1, 12)
+EWCV.logSARIMA(data.hydro, 3, 1, 1, 1, 1, 1, 12)
+```
+
+Overall, the AIC and BIC values are decreasing which means the models are 
+getting better. Also the ACF plot of residuals shows no significant 
+autocorrelations and the p-values for Ljung-Box statistics confirms this.
+
+After applying Box-Cox transformation and log transformation, there is still 
+small violations to the normality assumption of Std Residuals. The violations 
+occurs at the right tail, but most of the points still lie in(near) the 95% 
+confidence intervals. Only a few points lie outside the interval obviously. 
+Therefore I think the model is reasonably satisfying and stop further building 
+the model.
+
+## Descriptive Statistics
+```{r Scenario1, Descriptive Statistics}
+hydro.mean <- mean(data.hydro$Value); hydro.mean
+hydro.var <- var(data.hydro$Value); hydro.var
+hydro.max_min <- range(data.hydro$Value); hydro.max_min
+```
+
+## Forecast 24-month ahead
+```{r scenario1, Forecast 24-month ahead}
+hydro.fit3.result <- sarima.for(as.ts(log(data.hydro$Value)), 24, 
+                                            3, 1, 1, 1, 1, 1, 12, plot = FALSE)
+hydro.logforecast <- as.numeric(hydro.fit3.result$pred)
+hydro.forecast <- exp(hydro.logforecast)
+hydro.forecast.mean <- mean(hydro.forecast); hydro.forecast.mean
+hydro.forecast.var <- var(hydro.forecast); hydro.forecast.var
+hydro.forecast.max_min <- range(hydro.forecast); hydro.forecast.max_min
+```
+
+### Prediction interval
+```{r Scenario prediction interval}
+hydro.forecast.se <- hydro.fit3.result$se
+PI.lower <- exp(hydro.logforecast - 1.96 * hydro.forecast.se)
+PI.upper <- exp(hydro.logforecast + 1.96 * hydro.forecast.se)
+```
+
+# Scenario 2: Financial Risk Forecast
+
+```{r}
+EWCV.GARCH <- function(data, formula) {
+  len <- nrow(data)
+  data.train.percent <- c(0.5, 0.6, 0.7, 0.8, 0.9)
+  i <- 1
+  MSE <- c()
+  for (percent in data.train.percent) {
+    num.train <- round(len * percent)
+    num.test <- num.train + 1
+    data.train <- data$Value[1:num.train]
+    data.test <- data$Value[num.test:len]
+    len.test <- length(data.test)
+    ## Change model here
+    model <- garchFit(formula = formula, data = data.train, trace = FALSE)
+    ## Make predictions
+    pred <- predict(model, len.test)$meanForecast[1]
+    ## Calculate MSE
+    MSE[i] <- mean((data.test - pred)^2)
+    i <- i + 1
+  }
+  return(mean(MSE))
+}
+```
+
+```{r}
+EWCV.eGARCH <- function(data, spec) {
+  len <- nrow(data)
+  data.train.percent <- c(0.5, 0.6, 0.7, 0.8, 0.9)
+  i <- 1
+  MSE <- c()
+  for (percent in data.train.percent) {
+    num.train <- round(len * percent)
+    num.test <- num.train + 1
+    data.train <- data$Value[1:num.train]
+    data.test <- data$Value[num.test:len]
+    len.test <- length(data.test)
+    ## Change model here
+    model <- rugarch::ugarchfit(spec, data = data.train)
+    ## Make predictions
+    pred <- as.numeric(fitted(rugarch::ugarchforecast(model, n.ahead = len.test)))
+    ## Calculate MSE
+    MSE[i] <- mean((data.test - pred)^2)
+    i <- i + 1
+  }
+  return(mean(MSE))
+}
+```
+
+## stock1
+```{r Stock1 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock1)
+ts.plot(data.stock1^2)
+acf(data.stock1)
+pacf(data.stock1)
+summary(ur.kpss(as.ts(data.stock1)))
+summary(ur.kpss(as.ts(data.stock1^2)))
+```
+```{r Stock1 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock1.sqr <- data.stock1$Value^2
+stock1.fit1 <- garchFit(formula = ~ garch(1, 0), data = data.stock1, trace = FALSE)
+summary(stock1.fit1)
+stock1.fit1.res <- residuals(stock1.fit1, standardize = TRUE)
+acf(stock1.fit1.res)
+qqnorm(stock1.fit1.res, main = "Normal Q-Q Plot of Std Residuals")
+qqline(stock1.fit1.res, col = "red")
+
+stock1.fit1.sigma.sqr <- stock1.fit1@sigma.t^2
+stock1.fit1.vol <- sqrt(stock1.fit1.sigma.sqr)
+stock1.fit1.sequence.mean <- mean(stock1.sqr/stock1.fit1.sigma.sqr); stock1.fit1.sequence.mean
+ts.plot(data.stock1)
+lines(stock1.fit1.vol, col = 'red')
+
+stock1.fit1.formula <- formula("~ garch(1, 0)")
+stock1.fit1.CV <- EWCV.GARCH(data.stock1, stock1.fit1.formula)
+```
+```{r Stock1 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock1.fit2 <- garchFit(formula = ~ garch(1, 1), data = data.stock1, trace = FALSE)
+summary(stock1.fit2)
+stock1.fit2.res <- residuals(stock1.fit2, standardize = TRUE)
+acf(stock1.fit2.res)
+qqnorm(stock1.fit2.res, main = "Normal Q-Q Plot of Std Residuals")
+qqline(stock1.fit2.res, col = "red")
+
+stock1.fit2.sigma.sqr <- stock1.fit2@sigma.t^2
+stock1.fit2.vol <- sqrt(stock1.fit2.sigma.sqr)
+stock1.fit2.sequence.mean <- mean(stock1.sqr/stock1.fit2.sigma.sqr); stock1.fit2.sequence.mean
+ts.plot(data.stock1)
+lines(stock1.fit2.vol, col = 'red')
+
+stock1.fit2.formula <- formula("~ garch(1, 1)")
+stock1.fit2.CV <- EWCV.GARCH(data.stock1, stock1.fit2.formula)
+```
+
+```{r Stock1 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock1.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(1, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock1.fit3 <- rugarch::ugarchfit(stock1.fit3.spec, data = data.stock1)
+infocriteria(stock1.fit3)
+
+stock1.fit3.res <- as.numeric(residuals(stock1.fit3, standardize = TRUE))
+acf(stock1.fit3.res)
+qqnorm(stock1.fit3.res, main = "Normal Q-Q Plot of Std Residuals")
+qqline(stock1.fit3.res, col = "red")
+
+stock1.fit3.vol <- as.numeric(rugarch::sigma(stock1.fit3))
+stock1.fit3.sigma.sqr <- stock1.fit3.vol^2
+stock1.fit3.sequence.mean <- mean(stock1.sqr/stock1.fit3.sigma.sqr); stock1.fit3.sequence.mean
+ts.plot(data.stock1)
+lines(stock1.fit3.vol, col = 'red')
+
+stock1.fit3.CV <- EWCV.eGARCH(data.stock1, stock1.fit3.spec)
+```
+```{r Stock1 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock1.fit1.CV; stock1.fit2.CV; stock1.fit3.CV
+```
+
+## stock2
+```{r Stock2 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock2)
+ts.plot(data.stock2^2)
+acf(data.stock2)
+pacf(data.stock2)
+summary(ur.kpss(as.ts(data.stock2)))
+summary(ur.kpss(as.ts(data.stock2^2)))
+```
+```{r Stock2 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock2.sqr <- data.stock2$Value^2
+stock2.fit1 <- garchFit(formula = ~ garch(5, 0), data = data.stock2, trace = FALSE)
+summary(stock2.fit1)
+stock2.fit1.res <- residuals(stock2.fit1, standardize = TRUE)
+acf(stock2.fit1.res)
+qqnorm(stock2.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock2.fit1.res, col = 'red')
+
+stock2.fit1.sigma.sqr <- stock2.fit1@sigma.t^2
+stock2.fit1.vol <- sqrt(stock2.fit1.sigma.sqr)
+stock2.fit1.sequence.mean <- mean(stock2.sqr/stock2.fit1.sigma.sqr); stock2.fit1.sequence.mean
+ts.plot(data.stock2)
+lines(stock2.fit1.vol, col = 'red')
+
+stock2.fit1.formula <- formula('~ garch(1, 0)')
+stock2.fit1.CV <- EWCV.GARCH(data.stock2, stock2.fit1.formula)
+```
+```{r Stock2 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock2.fit2 <- garchFit(formula = ~ garch(5, 1), data = data.stock2, trace = FALSE)
+summary(stock2.fit2)
+stock2.fit2.res <- residuals(stock2.fit2, standardize = TRUE)
+acf(stock2.fit2.res)
+qqnorm(stock2.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock2.fit2.res, col = 'red')
+
+stock2.fit2.sigma.sqr <- stock2.fit2@sigma.t^2
+stock2.fit2.vol <- sqrt(stock2.fit2.sigma.sqr)
+stock2.fit2.sequence.mean <- mean(stock2.sqr/stock2.fit2.sigma.sqr); stock2.fit2.sequence.mean
+ts.plot(data.stock2)
+lines(stock2.fit2.vol, col = 'red')
+
+stock2.fit2.formula <- formula('~ garch(1, 1)')
+stock2.fit2.CV <- EWCV.GARCH(data.stock2, stock2.fit2.formula)
+```
+
+```{r Stock2 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock2.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(2, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock2.fit3 <- rugarch::ugarchfit(stock2.fit3.spec, data = data.stock2)
+infocriteria(stock2.fit3)
+
+stock2.fit3.res <- as.numeric(residuals(stock2.fit3, standardize = TRUE))
+acf(stock2.fit3.res)
+qqnorm(stock2.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock2.fit3.res, col = 'red')
+
+stock2.fit3.vol <- as.numeric(rugarch::sigma(stock2.fit3))
+stock2.fit3.sigma.sqr <- stock2.fit3.vol^2
+stock2.fit3.sequence.mean <- mean(stock2.sqr/stock2.fit3.sigma.sqr); stock2.fit3.sequence.mean
+ts.plot(data.stock2)
+lines(stock2.fit3.vol, col = 'red')
+
+stock2.fit3.CV <- EWCV.eGARCH(data.stock2, stock2.fit3.spec)
+```
+```{r Stock2 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock2.fit1.CV; stock2.fit2.CV; stock2.fit3.CV
+```
+
+## stock3
+```{r Stock3 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock3)
+ts.plot(data.stock3^2)
+acf(data.stock3)
+pacf(data.stock3)
+summary(ur.kpss(as.ts(data.stock3)))
+summary(ur.kpss(as.ts(data.stock3^2)))
+```
+```{r Stock3 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock3.sqr <- data.stock3$Value^2
+stock3.fit1 <- garchFit(formula = ~ garch(12, 0), data = data.stock3, trace = FALSE)
+summary(stock3.fit1)
+stock3.fit1.res <- residuals(stock3.fit1, standardize = TRUE)
+acf(stock3.fit1.res)
+qqnorm(stock3.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock3.fit1.res, col = 'red')
+
+stock3.fit1.sigma.sqr <- stock3.fit1@sigma.t^2
+stock3.fit1.vol <- sqrt(stock3.fit1.sigma.sqr)
+stock3.fit1.sequence.mean <- mean(stock3.sqr/stock3.fit1.sigma.sqr); stock3.fit1.sequence.mean
+ts.plot(data.stock3)
+lines(stock3.fit1.vol, col = 'red')
+
+stock3.fit1.formula <- formula('~ garch(1, 0)')
+stock3.fit1.CV <- EWCV.GARCH(data.stock3, stock3.fit1.formula)
+```
+```{r Stock3 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock3.fit2 <- garchFit(formula = ~ garch(8, 8), data = data.stock3, trace = FALSE)
+summary(stock3.fit2)
+stock3.fit2.res <- residuals(stock3.fit2, standardize = TRUE)
+acf(stock3.fit2.res)
+qqnorm(stock3.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock3.fit2.res, col = 'red')
+
+stock3.fit2.sigma.sqr <- stock3.fit2@sigma.t^2
+stock3.fit2.vol <- sqrt(stock3.fit2.sigma.sqr)
+stock3.fit2.sequence.mean <- mean(stock3.sqr/stock3.fit2.sigma.sqr); stock3.fit2.sequence.mean
+ts.plot(data.stock3)
+lines(stock3.fit2.vol, col = 'red')
+
+stock3.fit2.formula <- formula('~ garch(1, 1)')
+stock3.fit2.CV <- EWCV.GARCH(data.stock3, stock3.fit2.formula)
+```
+
+```{r Stock3 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock3.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(6, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock3.fit3 <- rugarch::ugarchfit(stock3.fit3.spec, data = data.stock3)
+infocriteria(stock3.fit3)
+
+stock3.fit3.res <- as.numeric(residuals(stock3.fit3, standardize = TRUE))
+acf(stock3.fit3.res)
+qqnorm(stock3.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock3.fit3.res, col = 'red')
+
+stock3.fit3.vol <- as.numeric(rugarch::sigma(stock3.fit3))
+stock3.fit3.sigma.sqr <- stock3.fit3.vol^2
+stock3.fit3.sequence.mean <- mean(stock3.sqr/stock3.fit3.sigma.sqr); stock3.fit3.sequence.mean
+ts.plot(data.stock3)
+lines(stock3.fit3.vol, col = 'red')
+
+stock3.fit3.CV <- EWCV.eGARCH(data.stock3, stock3.fit3.spec)
+```
+```{r Stock3 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock3.fit1.CV; stock3.fit2.CV; stock3.fit3.CV
+```
+
+## stock4
+```{r Stock4 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock4)
+ts.plot(data.stock4^2)
+acf(data.stock4)
+pacf(data.stock4)
+summary(ur.kpss(as.ts(data.stock4)))
+summary(ur.kpss(as.ts(data.stock4^2)))
+```
+```{r Stock4 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock4.sqr <- data.stock4$Value^2
+stock4.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock4, trace = FALSE)
+summary(stock4.fit1)
+stock4.fit1.res <- residuals(stock4.fit1, standardize = TRUE)
+acf(stock4.fit1.res)
+qqnorm(stock4.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock4.fit1.res, col = 'red')
+
+stock4.fit1.sigma.sqr <- stock4.fit1@sigma.t^2
+stock4.fit1.vol <- sqrt(stock4.fit1.sigma.sqr)
+stock4.fit1.sequence.mean <- mean(stock4.sqr/stock4.fit1.sigma.sqr); stock4.fit1.sequence.mean
+ts.plot(data.stock4)
+lines(stock4.fit1.vol, col = 'red')
+
+stock4.fit1.formula <- formula('~ garch(1, 0)')
+stock4.fit1.CV <- EWCV.GARCH(data.stock4, stock4.fit1.formula)
+```
+```{r Stock4 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock4.fit2 <- garchFit(formula = ~ garch(10, 3), data = data.stock4, trace = FALSE)
+summary(stock4.fit2)
+stock4.fit2.res <- residuals(stock4.fit2, standardize = TRUE)
+acf(stock4.fit2.res)
+qqnorm(stock4.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock4.fit2.res, col = 'red')
+
+stock4.fit2.sigma.sqr <- stock4.fit2@sigma.t^2
+stock4.fit2.vol <- sqrt(stock4.fit2.sigma.sqr)
+stock4.fit2.sequence.mean <- mean(stock4.sqr/stock4.fit2.sigma.sqr); stock4.fit2.sequence.mean
+ts.plot(data.stock4)
+lines(stock4.fit2.vol, col = 'red')
+
+stock4.fit2.formula <- formula('~ garch(1, 1)')
+stock4.fit2.CV <- EWCV.GARCH(data.stock4, stock4.fit2.formula)
+```
+
+```{r Stock4 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock4.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(4, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock4.fit3 <- rugarch::ugarchfit(stock4.fit3.spec, data = data.stock4)
+infocriteria(stock4.fit3)
+
+stock4.fit3.res <- as.numeric(residuals(stock4.fit3, standardize = TRUE))
+acf(stock4.fit3.res)
+qqnorm(stock4.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock4.fit3.res, col = 'red')
+
+stock4.fit3.vol <- as.numeric(rugarch::sigma(stock4.fit3))
+stock4.fit3.sigma.sqr <- stock4.fit3.vol^2
+stock4.fit3.sequence.mean <- mean(stock4.sqr/stock4.fit3.sigma.sqr); stock4.fit3.sequence.mean
+ts.plot(data.stock4)
+lines(stock4.fit3.vol, col = 'red')
+
+stock4.fit3.CV <- EWCV.eGARCH(data.stock4, stock4.fit3.spec)
+```
+```{r Stock4 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock4.fit1.CV; stock4.fit2.CV; stock4.fit3.CV
+```
+
+## stock5
+```{r Stock5 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock5)
+ts.plot(data.stock5^2)
+acf(data.stock5)
+pacf(data.stock5)
+summary(ur.kpss(as.ts(data.stock5)))
+summary(ur.kpss(as.ts(data.stock5^2)))
+```
+```{r Stock5 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock5.sqr <- data.stock5$Value^2
+stock5.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock5, trace = FALSE)
+summary(stock5.fit1)
+stock5.fit1.res <- residuals(stock5.fit1, standardize = TRUE)
+acf(stock5.fit1.res)
+qqnorm(stock5.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock5.fit1.res, col = 'red')
+
+stock5.fit1.sigma.sqr <- stock5.fit1@sigma.t^2
+stock5.fit1.vol <- sqrt(stock5.fit1.sigma.sqr)
+stock5.fit1.sequence.mean <- mean(stock5.sqr/stock5.fit1.sigma.sqr); stock5.fit1.sequence.mean
+ts.plot(data.stock5)
+lines(stock5.fit1.vol, col = 'red')
+
+stock5.fit1.formula <- formula('~ garch(1, 0)')
+stock5.fit1.CV <- EWCV.GARCH(data.stock5, stock5.fit1.formula)
+```
+```{r Stock5 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock5.fit2 <- garchFit(formula = ~ garch(10, 10), data = data.stock5, trace = FALSE)
+summary(stock5.fit2)
+stock5.fit2.res <- residuals(stock5.fit2, standardize = TRUE)
+acf(stock5.fit2.res)
+qqnorm(stock5.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock5.fit2.res, col = 'red')
+
+stock5.fit2.sigma.sqr <- stock5.fit2@sigma.t^2
+stock5.fit2.vol <- sqrt(stock5.fit2.sigma.sqr)
+stock5.fit2.sequence.mean <- mean(stock5.sqr/stock5.fit2.sigma.sqr); stock5.fit2.sequence.mean
+ts.plot(data.stock5)
+lines(stock5.fit2.vol, col = 'red')
+
+stock5.fit2.formula <- formula('~ garch(1, 1)')
+stock5.fit2.CV <- EWCV.GARCH(data.stock5, stock5.fit2.formula)
+```
+
+```{r Stock5 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock5.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(6, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock5.fit3 <- rugarch::ugarchfit(stock5.fit3.spec, data = data.stock5)
+infocriteria(stock5.fit3)
+
+stock5.fit3.res <- as.numeric(residuals(stock5.fit3, standardize = TRUE))
+acf(stock5.fit3.res)
+qqnorm(stock5.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock5.fit3.res, col = 'red')
+
+stock5.fit3.vol <- as.numeric(rugarch::sigma(stock5.fit3))
+stock5.fit3.sigma.sqr <- stock5.fit3.vol^2
+stock5.fit3.sequence.mean <- mean(stock5.sqr/stock5.fit3.sigma.sqr); stock5.fit3.sequence.mean
+ts.plot(data.stock5)
+lines(stock5.fit3.vol, col = 'red')
+
+stock5.fit3.CV <- EWCV.eGARCH(data.stock5, stock5.fit3.spec)
+```
+```{r Stock5 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock5.fit1.CV; stock5.fit2.CV; stock5.fit3.CV
+```
+
+## stock6
+```{r Stock6 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock6)
+ts.plot(data.stock6^2)
+acf(data.stock6)
+pacf(data.stock6)
+summary(ur.kpss(as.ts(data.stock6)))
+summary(ur.kpss(as.ts(data.stock6^2)))
+```
+```{r Stock6 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock6.sqr <- data.stock6$Value^2
+stock6.fit1 <- garchFit(formula = ~ garch(15, 0), data = data.stock6, trace = FALSE)
+summary(stock6.fit1)
+stock6.fit1.res <- residuals(stock6.fit1, standardize = TRUE)
+acf(stock6.fit1.res)
+qqnorm(stock6.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock6.fit1.res, col = 'red')
+
+stock6.fit1.sigma.sqr <- stock6.fit1@sigma.t^2
+stock6.fit1.vol <- sqrt(stock6.fit1.sigma.sqr)
+stock6.fit1.sequence.mean <- mean(stock6.sqr/stock6.fit1.sigma.sqr); stock6.fit1.sequence.mean
+ts.plot(data.stock6)
+lines(stock6.fit1.vol, col = 'red')
+
+stock6.fit1.formula <- formula('~ garch(1, 0)')
+stock6.fit1.CV <- EWCV.GARCH(data.stock6, stock6.fit1.formula)
+```
+```{r Stock6 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock6.fit2 <- garchFit(formula = ~ garch(15, 10), data = data.stock6, trace = FALSE)
+summary(stock6.fit2)
+stock6.fit2.res <- residuals(stock6.fit2, standardize = TRUE)
+acf(stock6.fit2.res)
+qqnorm(stock6.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock6.fit2.res, col = 'red')
+
+stock6.fit2.sigma.sqr <- stock6.fit2@sigma.t^2
+stock6.fit2.vol <- sqrt(stock6.fit2.sigma.sqr)
+stock6.fit2.sequence.mean <- mean(stock6.sqr/stock6.fit2.sigma.sqr); stock6.fit2.sequence.mean
+ts.plot(data.stock6)
+lines(stock6.fit2.vol, col = 'red')
+
+stock6.fit2.formula <- formula('~ garch(1, 1)')
+stock6.fit2.CV <- EWCV.GARCH(data.stock6, stock6.fit2.formula)
+```
+
+```{r Stock6 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock6.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(7, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock6.fit3 <- rugarch::ugarchfit(stock6.fit3.spec, data = data.stock6)
+infocriteria(stock6.fit3)
+
+stock6.fit3.res <- as.numeric(residuals(stock6.fit3, standardize = TRUE))
+acf(stock6.fit3.res)
+qqnorm(stock6.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock6.fit3.res, col = 'red')
+
+stock6.fit3.vol <- as.numeric(rugarch::sigma(stock6.fit3))
+stock6.fit3.sigma.sqr <- stock6.fit3.vol^2
+stock6.fit3.sequence.mean <- mean(stock6.sqr/stock6.fit3.sigma.sqr); stock6.fit3.sequence.mean
+ts.plot(data.stock6)
+lines(stock6.fit3.vol, col = 'red')
+
+stock6.fit3.CV <- EWCV.eGARCH(data.stock6, stock6.fit3.spec)
+```
+```{r Stock6 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock6.fit1.CV; stock6.fit2.CV; stock6.fit3.CV
+```
+
+## stock7
+```{r Stock7 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock7)
+ts.plot(data.stock7^2)
+acf(data.stock7)
+pacf(data.stock7)
+summary(ur.kpss(as.ts(data.stock7)))
+summary(ur.kpss(as.ts(data.stock7^2)))
+```
+```{r Stock7 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock7.sqr <- data.stock7$Value^2
+stock7.fit1 <- garchFit(formula = ~ garch(4, 0), data = data.stock7, trace = FALSE)
+summary(stock7.fit1)
+stock7.fit1.res <- residuals(stock7.fit1, standardize = TRUE)
+acf(stock7.fit1.res)
+qqnorm(stock7.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock7.fit1.res, col = 'red')
+
+stock7.fit1.sigma.sqr <- stock7.fit1@sigma.t^2
+stock7.fit1.vol <- sqrt(stock7.fit1.sigma.sqr)
+stock7.fit1.sequence.mean <- mean(stock7.sqr/stock7.fit1.sigma.sqr); stock7.fit1.sequence.mean
+ts.plot(data.stock7)
+lines(stock7.fit1.vol, col = 'red')
+
+stock7.fit1.formula <- formula('~ garch(1, 0)')
+stock7.fit1.CV <- EWCV.GARCH(data.stock7, stock7.fit1.formula)
+```
+```{r Stock7 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock7.fit2 <- garchFit(formula = ~ garch(4, 1), data = data.stock7, trace = FALSE)
+summary(stock7.fit2)
+stock7.fit2.res <- residuals(stock7.fit2, standardize = TRUE)
+acf(stock7.fit2.res)
+qqnorm(stock7.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock7.fit2.res, col = 'red')
+
+stock7.fit2.sigma.sqr <- stock7.fit2@sigma.t^2
+stock7.fit2.vol <- sqrt(stock7.fit2.sigma.sqr)
+stock7.fit2.sequence.mean <- mean(stock7.sqr/stock7.fit2.sigma.sqr); stock7.fit2.sequence.mean
+ts.plot(data.stock7)
+lines(stock7.fit2.vol, col = 'red')
+
+stock7.fit2.formula <- formula('~ garch(1, 1)')
+stock7.fit2.CV <- EWCV.GARCH(data.stock7, stock7.fit2.formula)
+```
+
+```{r Stock7 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock7.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(7, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock7.fit3 <- rugarch::ugarchfit(stock7.fit3.spec, data = data.stock7)
+infocriteria(stock7.fit3)
+
+stock7.fit3.res <- as.numeric(residuals(stock7.fit3, standardize = TRUE))
+acf(stock7.fit3.res)
+qqnorm(stock7.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock7.fit3.res, col = 'red')
+
+stock7.fit3.vol <- as.numeric(rugarch::sigma(stock7.fit3))
+stock7.fit3.sigma.sqr <- stock7.fit3.vol^2
+stock7.fit3.sequence.mean <- mean(stock7.sqr/stock7.fit3.sigma.sqr); stock7.fit3.sequence.mean
+ts.plot(data.stock7)
+lines(stock7.fit3.vol, col = 'red')
+
+stock7.fit3.CV <- EWCV.eGARCH(data.stock7, stock7.fit3.spec)
+```
+```{r Stock7 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock7.fit1.CV; stock7.fit2.CV; stock7.fit3.CV
+```
+
+## stock8
+```{r Stock8 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock8)
+ts.plot(data.stock8^2)
+acf(data.stock8)
+pacf(data.stock8)
+summary(ur.kpss(as.ts(data.stock8)))
+summary(ur.kpss(as.ts(data.stock8^2)))
+```
+```{r Stock8 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock8.sqr <- data.stock8$Value^2
+stock8.fit1 <- garchFit(formula = ~ garch(11, 0), data = data.stock8, trace = FALSE)
+summary(stock8.fit1)
+stock8.fit1.res <- residuals(stock8.fit1, standardize = TRUE)
+acf(stock8.fit1.res)
+qqnorm(stock8.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock8.fit1.res, col = 'red')
+
+stock8.fit1.sigma.sqr <- stock8.fit1@sigma.t^2
+stock8.fit1.vol <- sqrt(stock8.fit1.sigma.sqr)
+stock8.fit1.sequence.mean <- mean(stock8.sqr/stock8.fit1.sigma.sqr); stock8.fit1.sequence.mean
+ts.plot(data.stock8)
+lines(stock8.fit1.vol, col = 'red')
+
+stock8.fit1.formula <- formula('~ garch(1, 0)')
+stock8.fit1.CV <- EWCV.GARCH(data.stock8, stock8.fit1.formula)
+```
+```{r Stock8 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock8.fit2 <- garchFit(formula = ~ garch(11, 3), data = data.stock8, trace = FALSE)
+summary(stock8.fit2)
+stock8.fit2.res <- residuals(stock8.fit2, standardize = TRUE)
+acf(stock8.fit2.res)
+qqnorm(stock8.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock8.fit2.res, col = 'red')
+
+stock8.fit2.sigma.sqr <- stock8.fit2@sigma.t^2
+stock8.fit2.vol <- sqrt(stock8.fit2.sigma.sqr)
+stock8.fit2.sequence.mean <- mean(stock8.sqr/stock8.fit2.sigma.sqr); stock8.fit2.sequence.mean
+ts.plot(data.stock8)
+lines(stock8.fit2.vol, col = 'red')
+
+stock8.fit2.formula <- formula('~ garch(1, 1)')
+stock8.fit2.CV <- EWCV.GARCH(data.stock8, stock8.fit2.formula)
+```
+
+```{r Stock8 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock8.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(8, 3)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock8.fit3 <- rugarch::ugarchfit(stock8.fit3.spec, data = data.stock8)
+infocriteria(stock8.fit3)
+
+stock8.fit3.res <- as.numeric(residuals(stock8.fit3, standardize = TRUE))
+acf(stock8.fit3.res)
+qqnorm(stock8.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock8.fit3.res, col = 'red')
+
+stock8.fit3.vol <- as.numeric(rugarch::sigma(stock8.fit3))
+stock8.fit3.sigma.sqr <- stock8.fit3.vol^2
+stock8.fit3.sequence.mean <- mean(stock8.sqr/stock8.fit3.sigma.sqr); stock8.fit3.sequence.mean
+ts.plot(data.stock8)
+lines(stock8.fit3.vol, col = 'red')
+
+stock8.fit3.CV <- EWCV.eGARCH(data.stock8, stock8.fit3.spec)
+```
+```{r Stock8 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock8.fit1.CV; stock8.fit2.CV; stock8.fit3.CV
+```
+
+## stock9
+```{r Stock9 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock9)
+ts.plot(data.stock9^2)
+acf(data.stock9)
+pacf(data.stock9)
+summary(ur.kpss(as.ts(data.stock9)))
+summary(ur.kpss(as.ts(data.stock9^2)))
+```
+```{r Stock9 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock9.sqr <- data.stock9$Value^2
+stock9.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock9, trace = FALSE)
+summary(stock9.fit1)
+stock9.fit1.res <- residuals(stock9.fit1, standardize = TRUE)
+acf(stock9.fit1.res)
+qqnorm(stock9.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock9.fit1.res, col = 'red')
+
+stock9.fit1.sigma.sqr <- stock9.fit1@sigma.t^2
+stock9.fit1.vol <- sqrt(stock9.fit1.sigma.sqr)
+stock9.fit1.sequence.mean <- mean(stock9.sqr/stock9.fit1.sigma.sqr); stock9.fit1.sequence.mean
+ts.plot(data.stock9)
+lines(stock9.fit1.vol, col = 'red')
+
+stock9.fit1.formula <- formula('~ garch(1, 0)')
+stock9.fit1.CV <- EWCV.GARCH(data.stock9, stock9.fit1.formula)
+```
+```{r Stock9 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock9.fit2 <- garchFit(formula = ~ garch(11, 4), data = data.stock9, trace = FALSE)
+summary(stock9.fit2)
+stock9.fit2.res <- residuals(stock9.fit2, standardize = TRUE)
+acf(stock9.fit2.res)
+qqnorm(stock9.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock9.fit2.res, col = 'red')
+
+stock9.fit2.sigma.sqr <- stock9.fit2@sigma.t^2
+stock9.fit2.vol <- sqrt(stock9.fit2.sigma.sqr)
+stock9.fit2.sequence.mean <- mean(stock9.sqr/stock9.fit2.sigma.sqr); stock9.fit2.sequence.mean
+ts.plot(data.stock9)
+lines(stock9.fit2.vol, col = 'red')
+
+stock9.fit2.formula <- formula('~ garch(1, 1)')
+stock9.fit2.CV <- EWCV.GARCH(data.stock9, stock9.fit2.formula)
+```
+
+```{r Stock9 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock9.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(12, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock9.fit3 <- rugarch::ugarchfit(stock9.fit3.spec, data = data.stock9)
+infocriteria(stock9.fit3)
+
+stock9.fit3.res <- as.numeric(residuals(stock9.fit3, standardize = TRUE))
+acf(stock9.fit3.res)
+qqnorm(stock9.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock9.fit3.res, col = 'red')
+
+stock9.fit3.vol <- as.numeric(rugarch::sigma(stock9.fit3))
+stock9.fit3.sigma.sqr <- stock9.fit3.vol^2
+stock9.fit3.sequence.mean <- mean(stock9.sqr/stock9.fit3.sigma.sqr); stock9.fit3.sequence.mean
+ts.plot(data.stock9)
+lines(stock9.fit3.vol, col = 'red')
+
+stock9.fit3.CV <- EWCV.eGARCH(data.stock9, stock9.fit3.spec)
+```
+```{r Stock9 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock9.fit1.CV; stock9.fit2.CV; stock9.fit3.CV
+```
+
+## stock10
+```{r Stock10 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock10)
+ts.plot(data.stock10^2)
+acf(data.stock10)
+pacf(data.stock10)
+summary(ur.kpss(as.ts(data.stock10)))
+summary(ur.kpss(as.ts(data.stock10^2)))
+```
+```{r Stock10 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock10.sqr <- data.stock10$Value^2
+stock10.fit1 <- garchFit(formula = ~ garch(6, 0), data = data.stock10, trace = FALSE)
+summary(stock10.fit1)
+stock10.fit1.res <- residuals(stock10.fit1, standardize = TRUE)
+acf(stock10.fit1.res)
+qqnorm(stock10.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock10.fit1.res, col = 'red')
+
+stock10.fit1.sigma.sqr <- stock10.fit1@sigma.t^2
+stock10.fit1.vol <- sqrt(stock10.fit1.sigma.sqr)
+stock10.fit1.sequence.mean <- mean(stock10.sqr/stock10.fit1.sigma.sqr); stock10.fit1.sequence.mean
+ts.plot(data.stock10)
+lines(stock10.fit1.vol, col = 'red')
+
+stock10.fit1.formula <- formula('~ garch(1, 0)')
+stock10.fit1.CV <- EWCV.GARCH(data.stock10, stock10.fit1.formula)
+```
+```{r Stock10 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock10.fit2 <- garchFit(formula = ~ garch(4, 2), data = data.stock10, trace = FALSE)
+summary(stock10.fit2)
+stock10.fit2.res <- residuals(stock10.fit2, standardize = TRUE)
+acf(stock10.fit2.res)
+qqnorm(stock10.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock10.fit2.res, col = 'red')
+
+stock10.fit2.sigma.sqr <- stock10.fit2@sigma.t^2
+stock10.fit2.vol <- sqrt(stock10.fit2.sigma.sqr)
+stock10.fit2.sequence.mean <- mean(stock10.sqr/stock10.fit2.sigma.sqr); stock10.fit2.sequence.mean
+ts.plot(data.stock10)
+lines(stock10.fit2.vol, col = 'red')
+
+stock10.fit2.formula <- formula('~ garch(1, 1)')
+stock10.fit2.CV <- EWCV.GARCH(data.stock10, stock10.fit2.formula)
+```
+
+```{r Stock10 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock10.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(5, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock10.fit3 <- rugarch::ugarchfit(stock10.fit3.spec, data = data.stock10)
+infocriteria(stock10.fit3)
+
+stock10.fit3.res <- as.numeric(residuals(stock10.fit3, standardize = TRUE))
+acf(stock10.fit3.res)
+qqnorm(stock10.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock10.fit3.res, col = 'red')
+
+stock10.fit3.vol <- as.numeric(rugarch::sigma(stock10.fit3))
+stock10.fit3.sigma.sqr <- stock10.fit3.vol^2
+stock10.fit3.sequence.mean <- mean(stock10.sqr/stock10.fit3.sigma.sqr); stock10.fit3.sequence.mean
+ts.plot(data.stock10)
+lines(stock10.fit3.vol, col = 'red')
+
+stock10.fit3.CV <- EWCV.eGARCH(data.stock10, stock10.fit3.spec)
+```
+```{r Stock10 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock10.fit1.CV; stock10.fit2.CV; stock10.fit3.CV
+```
+
+## stock11
+```{r Stock11 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock11)
+ts.plot(data.stock11^2)
+acf(data.stock11)
+pacf(data.stock11)
+summary(ur.kpss(as.ts(data.stock11)))
+summary(ur.kpss(as.ts(data.stock11^2)))
+```
+```{r Stock11 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock11.sqr <- data.stock11$Value^2
+stock11.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock11, trace = FALSE)
+summary(stock11.fit1)
+stock11.fit1.res <- residuals(stock11.fit1, standardize = TRUE)
+acf(stock11.fit1.res)
+qqnorm(stock11.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock11.fit1.res, col = 'red')
+
+stock11.fit1.sigma.sqr <- stock11.fit1@sigma.t^2
+stock11.fit1.vol <- sqrt(stock11.fit1.sigma.sqr)
+stock11.fit1.sequence.mean <- mean(stock11.sqr/stock11.fit1.sigma.sqr); stock11.fit1.sequence.mean
+ts.plot(data.stock11)
+lines(stock11.fit1.vol, col = 'red')
+
+stock11.fit1.formula <- formula('~ garch(1, 0)')
+stock11.fit1.CV <- EWCV.GARCH(data.stock11, stock11.fit1.formula)
+```
+```{r Stock11 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock11.fit2 <- garchFit(formula = ~ garch(6, 2), data = data.stock11, trace = FALSE)
+summary(stock11.fit2)
+stock11.fit2.res <- residuals(stock11.fit2, standardize = TRUE)
+acf(stock11.fit2.res)
+qqnorm(stock11.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock11.fit2.res, col = 'red')
+
+stock11.fit2.sigma.sqr <- stock11.fit2@sigma.t^2
+stock11.fit2.vol <- sqrt(stock11.fit2.sigma.sqr)
+stock11.fit2.sequence.mean <- mean(stock11.sqr/stock11.fit2.sigma.sqr); stock11.fit2.sequence.mean
+ts.plot(data.stock11)
+lines(stock11.fit2.vol, col = 'red')
+
+stock11.fit2.formula <- formula('~ garch(1, 1)')
+stock11.fit2.CV <- EWCV.GARCH(data.stock11, stock11.fit2.formula)
+```
+
+```{r Stock11 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock11.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(9, 4)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock11.fit3 <- rugarch::ugarchfit(stock11.fit3.spec, data = data.stock11)
+infocriteria(stock11.fit3)
+
+stock11.fit3.res <- as.numeric(residuals(stock11.fit3, standardize = TRUE))
+acf(stock11.fit3.res)
+qqnorm(stock11.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock11.fit3.res, col = 'red')
+
+stock11.fit3.vol <- as.numeric(rugarch::sigma(stock11.fit3))
+stock11.fit3.sigma.sqr <- stock11.fit3.vol^2
+stock11.fit3.sequence.mean <- mean(stock11.sqr/stock11.fit3.sigma.sqr); stock11.fit3.sequence.mean
+ts.plot(data.stock11)
+lines(stock11.fit3.vol, col = 'red')
+
+stock11.fit3.CV <- EWCV.eGARCH(data.stock11, stock11.fit3.spec)
+```
+```{r Stock11 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock11.fit1.CV; stock11.fit2.CV; stock11.fit3.CV
+```
+
+## stock12
+```{r Stock12 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock12)
+ts.plot(data.stock12^2)
+acf(data.stock12)
+pacf(data.stock12)
+summary(ur.kpss(as.ts(data.stock12)))
+summary(ur.kpss(as.ts(data.stock12^2)))
+```
+```{r Stock12 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock12.sqr <- data.stock12$Value^2
+stock12.fit1 <- garchFit(formula = ~ garch(15, 0), data = data.stock12, trace = FALSE)
+summary(stock12.fit1)
+stock12.fit1.res <- residuals(stock12.fit1, standardize = TRUE)
+acf(stock12.fit1.res)
+qqnorm(stock12.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock12.fit1.res, col = 'red')
+
+stock12.fit1.sigma.sqr <- stock12.fit1@sigma.t^2
+stock12.fit1.vol <- sqrt(stock12.fit1.sigma.sqr)
+stock12.fit1.sequence.mean <- mean(stock12.sqr/stock12.fit1.sigma.sqr); stock12.fit1.sequence.mean
+ts.plot(data.stock12)
+lines(stock12.fit1.vol, col = 'red')
+
+stock12.fit1.formula <- formula('~ garch(1, 0)')
+stock12.fit1.CV <- EWCV.GARCH(data.stock12, stock12.fit1.formula)
+```
+```{r Stock12 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock12.fit2 <- garchFit(formula = ~ garch(5, 5), data = data.stock12, trace = FALSE)
+summary(stock12.fit2)
+stock12.fit2.res <- residuals(stock12.fit2, standardize = TRUE)
+acf(stock12.fit2.res)
+qqnorm(stock12.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock12.fit2.res, col = 'red')
+
+stock12.fit2.sigma.sqr <- stock12.fit2@sigma.t^2
+stock12.fit2.vol <- sqrt(stock12.fit2.sigma.sqr)
+stock12.fit2.sequence.mean <- mean(stock12.sqr/stock12.fit2.sigma.sqr); stock12.fit2.sequence.mean
+ts.plot(data.stock12)
+lines(stock12.fit2.vol, col = 'red')
+
+stock12.fit2.formula <- formula('~ garch(1, 1)')
+stock12.fit2.CV <- EWCV.GARCH(data.stock12, stock12.fit2.formula)
+```
+
+```{r Stock12 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock12.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(9, 3)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock12.fit3 <- rugarch::ugarchfit(stock12.fit3.spec, data = data.stock12)
+infocriteria(stock12.fit3)
+
+stock12.fit3.res <- as.numeric(residuals(stock12.fit3, standardize = TRUE))
+acf(stock12.fit3.res)
+qqnorm(stock12.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock12.fit3.res, col = 'red')
+
+stock12.fit3.vol <- as.numeric(rugarch::sigma(stock12.fit3))
+stock12.fit3.sigma.sqr <- stock12.fit3.vol^2
+stock12.fit3.sequence.mean <- mean(stock12.sqr/stock12.fit3.sigma.sqr); stock12.fit3.sequence.mean
+ts.plot(data.stock12)
+lines(stock12.fit3.vol, col = 'red')
+
+stock12.fit3.CV <- EWCV.eGARCH(data.stock12, stock12.fit3.spec)
+```
+```{r Stock12 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock12.fit1.CV; stock12.fit2.CV; stock12.fit3.CV
+```
+
+## stock13
+```{r Stock13 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock13)
+ts.plot(data.stock13^2)
+acf(data.stock13)
+pacf(data.stock13)
+summary(ur.kpss(as.ts(data.stock13)))
+summary(ur.kpss(as.ts(data.stock13^2)))
+```
+```{r Stock13 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock13.sqr <- data.stock13$Value^2
+stock13.fit1 <- garchFit(formula = ~ garch(30, 0), data = data.stock13, trace = FALSE)
+summary(stock13.fit1)
+stock13.fit1.res <- residuals(stock13.fit1, standardize = TRUE)
+acf(stock13.fit1.res)
+qqnorm(stock13.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock13.fit1.res, col = 'red')
+
+stock13.fit1.sigma.sqr <- stock13.fit1@sigma.t^2
+stock13.fit1.vol <- sqrt(stock13.fit1.sigma.sqr)
+stock13.fit1.sequence.mean <- mean(stock13.sqr/stock13.fit1.sigma.sqr); stock13.fit1.sequence.mean
+ts.plot(data.stock13)
+lines(stock13.fit1.vol, col = 'red')
+
+stock13.fit1.formula <- formula('~ garch(1, 0)')
+stock13.fit1.CV <- EWCV.GARCH(data.stock13, stock13.fit1.formula)
+```
+```{r Stock13 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock13.fit2 <- garchFit(formula = ~ garch(15, 15), data = data.stock13, trace = FALSE)
+summary(stock13.fit2)
+stock13.fit2.res <- residuals(stock13.fit2, standardize = TRUE)
+acf(stock13.fit2.res)
+qqnorm(stock13.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock13.fit2.res, col = 'red')
+
+stock13.fit2.sigma.sqr <- stock13.fit2@sigma.t^2
+stock13.fit2.vol <- sqrt(stock13.fit2.sigma.sqr)
+stock13.fit2.sequence.mean <- mean(stock13.sqr/stock13.fit2.sigma.sqr); stock13.fit2.sequence.mean
+ts.plot(data.stock13)
+lines(stock13.fit2.vol, col = 'red')
+
+stock13.fit2.formula <- formula('~ garch(1, 1)')
+stock13.fit2.CV <- EWCV.GARCH(data.stock13, stock13.fit2.formula)
+```
+
+```{r Stock13 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock13.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(9, 6)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock13.fit3 <- rugarch::ugarchfit(stock13.fit3.spec, data = data.stock13)
+infocriteria(stock13.fit3)
+
+stock13.fit3.res <- as.numeric(residuals(stock13.fit3, standardize = TRUE))
+acf(stock13.fit3.res)
+qqnorm(stock13.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock13.fit3.res, col = 'red')
+
+stock13.fit3.vol <- as.numeric(rugarch::sigma(stock13.fit3))
+stock13.fit3.sigma.sqr <- stock13.fit3.vol^2
+stock13.fit3.sequence.mean <- mean(stock13.sqr/stock13.fit3.sigma.sqr); stock13.fit3.sequence.mean
+ts.plot(data.stock13)
+lines(stock13.fit3.vol, col = 'red')
+
+stock13.fit3.CV <- EWCV.eGARCH(data.stock13, stock13.fit3.spec)
+```
+```{r Stock13 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock13.fit1.CV; stock13.fit2.CV; stock13.fit3.CV
+```
+
+## stock14
+```{r Stock14 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock14)
+ts.plot(data.stock14^2)
+acf(data.stock14)
+pacf(data.stock14)
+summary(ur.kpss(as.ts(data.stock14)))
+summary(ur.kpss(as.ts(data.stock14^2)))
+```
+```{r Stock14 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock14.sqr <- data.stock14$Value^2
+stock14.fit1 <- garchFit(formula = ~ garch(20, 0), data = data.stock14, trace = FALSE)
+summary(stock14.fit1)
+stock14.fit1.res <- residuals(stock14.fit1, standardize = TRUE)
+acf(stock14.fit1.res)
+qqnorm(stock14.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock14.fit1.res, col = 'red')
+
+stock14.fit1.sigma.sqr <- stock14.fit1@sigma.t^2
+stock14.fit1.vol <- sqrt(stock14.fit1.sigma.sqr)
+stock14.fit1.sequence.mean <- mean(stock14.sqr/stock14.fit1.sigma.sqr); stock14.fit1.sequence.mean
+ts.plot(data.stock14)
+lines(stock14.fit1.vol, col = 'red')
+
+stock14.fit1.formula <- formula('~ garch(1, 0)')
+stock14.fit1.CV <- EWCV.GARCH(data.stock14, stock14.fit1.formula)
+```
+```{r Stock14 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock14.fit2 <- garchFit(formula = ~ garch(10, 10), data = data.stock14, trace = FALSE)
+summary(stock14.fit2)
+stock14.fit2.res <- residuals(stock14.fit2, standardize = TRUE)
+acf(stock14.fit2.res)
+qqnorm(stock14.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock14.fit2.res, col = 'red')
+
+stock14.fit2.sigma.sqr <- stock14.fit2@sigma.t^2
+stock14.fit2.vol <- sqrt(stock14.fit2.sigma.sqr)
+stock14.fit2.sequence.mean <- mean(stock14.sqr/stock14.fit2.sigma.sqr); stock14.fit2.sequence.mean
+ts.plot(data.stock14)
+lines(stock14.fit2.vol, col = 'red')
+
+stock14.fit2.formula <- formula('~ garch(1, 1)')
+stock14.fit2.CV <- EWCV.GARCH(data.stock14, stock14.fit2.formula)
+```
+
+```{r Stock14 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock14.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(10, 4)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock14.fit3 <- rugarch::ugarchfit(stock14.fit3.spec, data = data.stock14)
+infocriteria(stock14.fit3)
+
+stock14.fit3.res <- as.numeric(residuals(stock14.fit3, standardize = TRUE))
+acf(stock14.fit3.res)
+qqnorm(stock14.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock14.fit3.res, col = 'red')
+
+stock14.fit3.vol <- as.numeric(rugarch::sigma(stock14.fit3))
+stock14.fit3.sigma.sqr <- stock14.fit3.vol^2
+stock14.fit3.sequence.mean <- mean(stock14.sqr/stock14.fit3.sigma.sqr); stock14.fit3.sequence.mean
+ts.plot(data.stock14)
+lines(stock14.fit3.vol, col = 'red')
+
+stock14.fit3.CV <- EWCV.eGARCH(data.stock14, stock14.fit3.spec)
+```
+```{r Stock14 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock14.fit1.CV; stock14.fit2.CV; stock14.fit3.CV
+```
+
+## stock15
+```{r Stock15 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock15)
+ts.plot(data.stock15^2)
+acf(data.stock15)
+pacf(data.stock15)
+summary(ur.kpss(as.ts(data.stock15)))
+summary(ur.kpss(as.ts(data.stock15^2)))
+```
+```{r Stock15 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock15.sqr <- data.stock15$Value^2
+stock15.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock15, trace = FALSE)
+summary(stock15.fit1)
+stock15.fit1.res <- residuals(stock15.fit1, standardize = TRUE)
+acf(stock15.fit1.res)
+qqnorm(stock15.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock15.fit1.res, col = 'red')
+
+stock15.fit1.sigma.sqr <- stock15.fit1@sigma.t^2
+stock15.fit1.vol <- sqrt(stock15.fit1.sigma.sqr)
+stock15.fit1.sequence.mean <- mean(stock15.sqr/stock15.fit1.sigma.sqr); stock15.fit1.sequence.mean
+ts.plot(data.stock15)
+lines(stock15.fit1.vol, col = 'red')
+
+stock15.fit1.formula <- formula('~ garch(1, 0)')
+stock15.fit1.CV <- EWCV.GARCH(data.stock15, stock15.fit1.formula)
+```
+```{r Stock15 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock15.fit2 <- garchFit(formula = ~ garch(10, 10), data = data.stock15, trace = FALSE)
+summary(stock15.fit2)
+stock15.fit2.res <- residuals(stock15.fit2, standardize = TRUE)
+acf(stock15.fit2.res)
+qqnorm(stock15.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock15.fit2.res, col = 'red')
+
+stock15.fit2.sigma.sqr <- stock15.fit2@sigma.t^2
+stock15.fit2.vol <- sqrt(stock15.fit2.sigma.sqr)
+stock15.fit2.sequence.mean <- mean(stock15.sqr/stock15.fit2.sigma.sqr); stock15.fit2.sequence.mean
+ts.plot(data.stock15)
+lines(stock15.fit2.vol, col = 'red')
+
+stock15.fit2.formula <- formula('~ garch(1, 1)')
+stock15.fit2.CV <- EWCV.GARCH(data.stock15, stock15.fit2.formula)
+```
+
+```{r Stock15 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock15.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(8, 4)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock15.fit3 <- rugarch::ugarchfit(stock15.fit3.spec, data = data.stock15)
+infocriteria(stock15.fit3)
+
+stock15.fit3.res <- as.numeric(residuals(stock15.fit3, standardize = TRUE))
+acf(stock15.fit3.res)
+qqnorm(stock15.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock15.fit3.res, col = 'red')
+
+stock15.fit3.vol <- as.numeric(rugarch::sigma(stock15.fit3))
+stock15.fit3.sigma.sqr <- stock15.fit3.vol^2
+stock15.fit3.sequence.mean <- mean(stock15.sqr/stock15.fit3.sigma.sqr); stock15.fit3.sequence.mean
+ts.plot(data.stock15)
+lines(stock15.fit3.vol, col = 'red')
+
+stock15.fit3.CV <- EWCV.eGARCH(data.stock15, stock15.fit3.spec)
+```
+```{r Stock15 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock15.fit1.CV; stock15.fit2.CV; stock15.fit3.CV
+```
+
+## stock16
+```{r Stock16 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock16)
+ts.plot(data.stock16^2)
+acf(data.stock16)
+pacf(data.stock16)
+summary(ur.kpss(as.ts(data.stock16)))
+summary(ur.kpss(as.ts(data.stock16^2)))
+```
+```{r Stock16 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock16.sqr <- data.stock16$Value^2
+stock16.fit1 <- garchFit(formula = ~ garch(7, 0), data = data.stock16, trace = FALSE)
+summary(stock16.fit1)
+stock16.fit1.res <- residuals(stock16.fit1, standardize = TRUE)
+acf(stock16.fit1.res)
+qqnorm(stock16.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock16.fit1.res, col = 'red')
+
+stock16.fit1.sigma.sqr <- stock16.fit1@sigma.t^2
+stock16.fit1.vol <- sqrt(stock16.fit1.sigma.sqr)
+stock16.fit1.sequence.mean <- mean(stock16.sqr/stock16.fit1.sigma.sqr); stock16.fit1.sequence.mean
+ts.plot(data.stock16)
+lines(stock16.fit1.vol, col = 'red')
+
+stock16.fit1.formula <- formula('~ garch(1, 0)')
+stock16.fit1.CV <- EWCV.GARCH(data.stock16, stock16.fit1.formula)
+```
+```{r Stock16 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock16.fit2 <- garchFit(formula = ~ garch(10, 4), data = data.stock16, trace = FALSE)
+summary(stock16.fit2)
+stock16.fit2.res <- residuals(stock16.fit2, standardize = TRUE)
+acf(stock16.fit2.res)
+qqnorm(stock16.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock16.fit2.res, col = 'red')
+
+stock16.fit2.sigma.sqr <- stock16.fit2@sigma.t^2
+stock16.fit2.vol <- sqrt(stock16.fit2.sigma.sqr)
+stock16.fit2.sequence.mean <- mean(stock16.sqr/stock16.fit2.sigma.sqr); stock16.fit2.sequence.mean
+ts.plot(data.stock16)
+lines(stock16.fit2.vol, col = 'red')
+
+stock16.fit2.formula <- formula('~ garch(1, 1)')
+stock16.fit2.CV <- EWCV.GARCH(data.stock16, stock16.fit2.formula)
+```
+
+```{r Stock16 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock16.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(9, 4)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock16.fit3 <- rugarch::ugarchfit(stock16.fit3.spec, data = data.stock16)
+infocriteria(stock16.fit3)
+
+stock16.fit3.res <- as.numeric(residuals(stock16.fit3, standardize = TRUE))
+acf(stock16.fit3.res)
+qqnorm(stock16.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock16.fit3.res, col = 'red')
+
+stock16.fit3.vol <- as.numeric(rugarch::sigma(stock16.fit3))
+stock16.fit3.sigma.sqr <- stock16.fit3.vol^2
+stock16.fit3.sequence.mean <- mean(stock16.sqr/stock16.fit3.sigma.sqr); stock16.fit3.sequence.mean
+ts.plot(data.stock16)
+lines(stock16.fit3.vol, col = 'red')
+
+stock16.fit3.CV <- EWCV.eGARCH(data.stock16, stock16.fit3.spec)
+```
+```{r Stock16 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock16.fit1.CV; stock16.fit2.CV; stock16.fit3.CV
+```
+
+## stock17
+```{r Stock17 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock17)
+ts.plot(data.stock17^2)
+acf(data.stock17)
+pacf(data.stock17)
+summary(ur.kpss(as.ts(data.stock17)))
+summary(ur.kpss(as.ts(data.stock17^2)))
+```
+```{r Stock17 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock17.sqr <- data.stock17$Value^2
+stock17.fit1 <- garchFit(formula = ~ garch(15, 0), data = data.stock17, trace = FALSE)
+summary(stock17.fit1)
+stock17.fit1.res <- residuals(stock17.fit1, standardize = TRUE)
+acf(stock17.fit1.res)
+qqnorm(stock17.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock17.fit1.res, col = 'red')
+
+stock17.fit1.sigma.sqr <- stock17.fit1@sigma.t^2
+stock17.fit1.vol <- sqrt(stock17.fit1.sigma.sqr)
+stock17.fit1.sequence.mean <- mean(stock17.sqr/stock17.fit1.sigma.sqr); stock17.fit1.sequence.mean
+ts.plot(data.stock17)
+lines(stock17.fit1.vol, col = 'red')
+
+stock17.fit1.formula <- formula('~ garch(1, 0)')
+stock17.fit1.CV <- EWCV.GARCH(data.stock17, stock17.fit1.formula)
+```
+```{r Stock17 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock17.fit2 <- garchFit(formula = ~ garch(10, 4), data = data.stock17, trace = FALSE)
+summary(stock17.fit2)
+stock17.fit2.res <- residuals(stock17.fit2, standardize = TRUE)
+acf(stock17.fit2.res)
+qqnorm(stock17.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock17.fit2.res, col = 'red')
+
+stock17.fit2.sigma.sqr <- stock17.fit2@sigma.t^2
+stock17.fit2.vol <- sqrt(stock17.fit2.sigma.sqr)
+stock17.fit2.sequence.mean <- mean(stock17.sqr/stock17.fit2.sigma.sqr); stock17.fit2.sequence.mean
+ts.plot(data.stock17)
+lines(stock17.fit2.vol, col = 'red')
+
+stock17.fit2.formula <- formula('~ garch(1, 1)')
+stock17.fit2.CV <- EWCV.GARCH(data.stock17, stock17.fit2.formula)
+```
+
+```{r Stock17 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock17.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(7, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock17.fit3 <- rugarch::ugarchfit(stock17.fit3.spec, data = data.stock17)
+infocriteria(stock17.fit3)
+
+stock17.fit3.res <- as.numeric(residuals(stock17.fit3, standardize = TRUE))
+acf(stock17.fit3.res)
+qqnorm(stock17.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock17.fit3.res, col = 'red')
+
+stock17.fit3.vol <- as.numeric(rugarch::sigma(stock17.fit3))
+stock17.fit3.sigma.sqr <- stock17.fit3.vol^2
+stock17.fit3.sequence.mean <- mean(stock17.sqr/stock17.fit3.sigma.sqr); stock17.fit3.sequence.mean
+ts.plot(data.stock17)
+lines(stock17.fit3.vol, col = 'red')
+
+stock17.fit3.CV <- EWCV.eGARCH(data.stock17, stock17.fit3.spec)
+```
+```{r Stock17 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock17.fit1.CV; stock17.fit2.CV; stock17.fit3.CV
+```
+
+## stock18
+```{r Stock18 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock18)
+ts.plot(data.stock18^2)
+acf(data.stock18)
+pacf(data.stock18)
+summary(ur.kpss(as.ts(data.stock18)))
+summary(ur.kpss(as.ts(data.stock18^2)))
+```
+```{r Stock18 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock18.sqr <- data.stock18$Value^2
+stock18.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock18, trace = FALSE)
+summary(stock18.fit1)
+stock18.fit1.res <- residuals(stock18.fit1, standardize = TRUE)
+acf(stock18.fit1.res)
+qqnorm(stock18.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock18.fit1.res, col = 'red')
+
+stock18.fit1.sigma.sqr <- stock18.fit1@sigma.t^2
+stock18.fit1.vol <- sqrt(stock18.fit1.sigma.sqr)
+stock18.fit1.sequence.mean <- mean(stock18.sqr/stock18.fit1.sigma.sqr); stock18.fit1.sequence.mean
+ts.plot(data.stock18)
+lines(stock18.fit1.vol, col = 'red')
+
+stock18.fit1.formula <- formula('~ garch(1, 0)')
+stock18.fit1.CV <- EWCV.GARCH(data.stock18, stock18.fit1.formula)
+```
+```{r Stock18 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock18.fit2 <- garchFit(formula = ~ garch(15, 8), data = data.stock18, trace = FALSE)
+summary(stock18.fit2)
+stock18.fit2.res <- residuals(stock18.fit2, standardize = TRUE)
+acf(stock18.fit2.res)
+qqnorm(stock18.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock18.fit2.res, col = 'red')
+
+stock18.fit2.sigma.sqr <- stock18.fit2@sigma.t^2
+stock18.fit2.vol <- sqrt(stock18.fit2.sigma.sqr)
+stock18.fit2.sequence.mean <- mean(stock18.sqr/stock18.fit2.sigma.sqr); stock18.fit2.sequence.mean
+ts.plot(data.stock18)
+lines(stock18.fit2.vol, col = 'red')
+
+stock18.fit2.formula <- formula('~ garch(1, 1)')
+stock18.fit2.CV <- EWCV.GARCH(data.stock18, stock18.fit2.formula)
+```
+
+```{r Stock18 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock18.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(7, 3)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock18.fit3 <- rugarch::ugarchfit(stock18.fit3.spec, data = data.stock18)
+infocriteria(stock18.fit3)
+
+stock18.fit3.res <- as.numeric(residuals(stock18.fit3, standardize = TRUE))
+acf(stock18.fit3.res)
+qqnorm(stock18.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock18.fit3.res, col = 'red')
+
+stock18.fit3.vol <- as.numeric(rugarch::sigma(stock18.fit3))
+stock18.fit3.sigma.sqr <- stock18.fit3.vol^2
+stock18.fit3.sequence.mean <- mean(stock18.sqr/stock18.fit3.sigma.sqr); stock18.fit3.sequence.mean
+ts.plot(data.stock18)
+lines(stock18.fit3.vol, col = 'red')
+
+stock18.fit3.CV <- EWCV.eGARCH(data.stock18, stock18.fit3.spec)
+```
+```{r Stock18 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock18.fit1.CV; stock18.fit2.CV; stock18.fit3.CV
+```
+
+## stock19
+```{r Stock19 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock19)
+ts.plot(data.stock19^2)
+acf(data.stock19)
+pacf(data.stock19)
+summary(ur.kpss(as.ts(data.stock19)))
+summary(ur.kpss(as.ts(data.stock19^2)))
+```
+```{r Stock19 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock19.sqr <- data.stock19$Value^2
+stock19.fit1 <- garchFit(formula = ~ garch(15, 0), data = data.stock19, trace = FALSE)
+summary(stock19.fit1)
+stock19.fit1.res <- residuals(stock19.fit1, standardize = TRUE)
+acf(stock19.fit1.res)
+qqnorm(stock19.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock19.fit1.res, col = 'red')
+
+stock19.fit1.sigma.sqr <- stock19.fit1@sigma.t^2
+stock19.fit1.vol <- sqrt(stock19.fit1.sigma.sqr)
+stock19.fit1.sequence.mean <- mean(stock19.sqr/stock19.fit1.sigma.sqr); stock19.fit1.sequence.mean
+ts.plot(data.stock19)
+lines(stock19.fit1.vol, col = 'red')
+
+stock19.fit1.formula <- formula('~ garch(1, 0)')
+stock19.fit1.CV <- EWCV.GARCH(data.stock19, stock19.fit1.formula)
+```
+```{r Stock19 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock19.fit2 <- garchFit(formula = ~ garch(10, 10), data = data.stock19, trace = FALSE)
+summary(stock19.fit2)
+stock19.fit2.res <- residuals(stock19.fit2, standardize = TRUE)
+acf(stock19.fit2.res)
+qqnorm(stock19.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock19.fit2.res, col = 'red')
+
+stock19.fit2.sigma.sqr <- stock19.fit2@sigma.t^2
+stock19.fit2.vol <- sqrt(stock19.fit2.sigma.sqr)
+stock19.fit2.sequence.mean <- mean(stock19.sqr/stock19.fit2.sigma.sqr); stock19.fit2.sequence.mean
+ts.plot(data.stock19)
+lines(stock19.fit2.vol, col = 'red')
+
+stock19.fit2.formula <- formula('~ garch(1, 1)')
+stock19.fit2.CV <- EWCV.GARCH(data.stock19, stock19.fit2.formula)
+```
+
+```{r Stock19 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock19.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(6, 3)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock19.fit3 <- rugarch::ugarchfit(stock19.fit3.spec, data = data.stock19)
+infocriteria(stock19.fit3)
+
+stock19.fit3.res <- as.numeric(residuals(stock19.fit3, standardize = TRUE))
+acf(stock19.fit3.res)
+qqnorm(stock19.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock19.fit3.res, col = 'red')
+
+stock19.fit3.vol <- as.numeric(rugarch::sigma(stock19.fit3))
+stock19.fit3.sigma.sqr <- stock19.fit3.vol^2
+stock19.fit3.sequence.mean <- mean(stock19.sqr/stock19.fit3.sigma.sqr); stock19.fit3.sequence.mean
+ts.plot(data.stock19)
+lines(stock19.fit3.vol, col = 'red')
+
+stock19.fit3.CV <- EWCV.eGARCH(data.stock19, stock19.fit3.spec)
+```
+```{r Stock19 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock19.fit1.CV; stock19.fit2.CV; stock19.fit3.CV
+```
+
+## stock20
+```{r Stock20 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock20)
+ts.plot(data.stock20^2)
+acf(data.stock20)
+pacf(data.stock20)
+summary(ur.kpss(as.ts(data.stock20)))
+summary(ur.kpss(as.ts(data.stock20^2)))
+```
+```{r Stock20 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock20.sqr <- data.stock20$Value^2
+stock20.fit1 <- garchFit(formula = ~ garch(13, 0), data = data.stock20, trace = FALSE)
+summary(stock20.fit1)
+stock20.fit1.res <- residuals(stock20.fit1, standardize = TRUE)
+acf(stock20.fit1.res)
+qqnorm(stock20.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock20.fit1.res, col = 'red')
+
+stock20.fit1.sigma.sqr <- stock20.fit1@sigma.t^2
+stock20.fit1.vol <- sqrt(stock20.fit1.sigma.sqr)
+stock20.fit1.sequence.mean <- mean(stock20.sqr/stock20.fit1.sigma.sqr); stock20.fit1.sequence.mean
+ts.plot(data.stock20)
+lines(stock20.fit1.vol, col = 'red')
+
+stock20.fit1.formula <- formula('~ garch(1, 0)')
+stock20.fit1.CV <- EWCV.GARCH(data.stock20, stock20.fit1.formula)
+```
+```{r Stock20 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock20.fit2 <- garchFit(formula = ~ garch(10, 5), data = data.stock20, trace = FALSE)
+summary(stock20.fit2)
+stock20.fit2.res <- residuals(stock20.fit2, standardize = TRUE)
+acf(stock20.fit2.res)
+qqnorm(stock20.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock20.fit2.res, col = 'red')
+
+stock20.fit2.sigma.sqr <- stock20.fit2@sigma.t^2
+stock20.fit2.vol <- sqrt(stock20.fit2.sigma.sqr)
+stock20.fit2.sequence.mean <- mean(stock20.sqr/stock20.fit2.sigma.sqr); stock20.fit2.sequence.mean
+ts.plot(data.stock20)
+lines(stock20.fit2.vol, col = 'red')
+
+stock20.fit2.formula <- formula('~ garch(1, 1)')
+stock20.fit2.CV <- EWCV.GARCH(data.stock20, stock20.fit2.formula)
+```
+
+```{r Stock20 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock20.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(9, 5)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock20.fit3 <- rugarch::ugarchfit(stock20.fit3.spec, data = data.stock20)
+infocriteria(stock20.fit3)
+
+stock20.fit3.res <- as.numeric(residuals(stock20.fit3, standardize = TRUE))
+acf(stock20.fit3.res)
+qqnorm(stock20.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock20.fit3.res, col = 'red')
+
+stock20.fit3.vol <- as.numeric(rugarch::sigma(stock20.fit3))
+stock20.fit3.sigma.sqr <- stock20.fit3.vol^2
+stock20.fit3.sequence.mean <- mean(stock20.sqr/stock20.fit3.sigma.sqr); stock20.fit3.sequence.mean
+ts.plot(data.stock20)
+lines(stock20.fit3.vol, col = 'red')
+
+stock20.fit3.CV <- EWCV.eGARCH(data.stock20, stock20.fit3.spec)
+```
+```{r Stock20 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock20.fit1.CV; stock20.fit2.CV; stock20.fit3.CV
+```
+
+## stock21
+```{r Stock21 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock21)
+ts.plot(data.stock21^2)
+acf(data.stock21)
+pacf(data.stock21)
+summary(ur.kpss(as.ts(data.stock21)))
+summary(ur.kpss(as.ts(data.stock21^2)))
+```
+```{r Stock21 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock21.sqr <- data.stock21$Value^2
+stock21.fit1 <- garchFit(formula = ~ garch(20, 0), data = data.stock21, trace = FALSE)
+summary(stock21.fit1)
+stock21.fit1.res <- residuals(stock21.fit1, standardize = TRUE)
+acf(stock21.fit1.res)
+qqnorm(stock21.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock21.fit1.res, col = 'red')
+
+stock21.fit1.sigma.sqr <- stock21.fit1@sigma.t^2
+stock21.fit1.vol <- sqrt(stock21.fit1.sigma.sqr)
+stock21.fit1.sequence.mean <- mean(stock21.sqr/stock21.fit1.sigma.sqr); stock21.fit1.sequence.mean
+ts.plot(data.stock21)
+lines(stock21.fit1.vol, col = 'red')
+
+stock21.fit1.formula <- formula('~ garch(1, 0)')
+stock21.fit1.CV <- EWCV.GARCH(data.stock21, stock21.fit1.formula)
+```
+```{r Stock21 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock21.fit2 <- garchFit(formula = ~ garch(10, 4), data = data.stock21, trace = FALSE)
+summary(stock21.fit2)
+stock21.fit2.res <- residuals(stock21.fit2, standardize = TRUE)
+acf(stock21.fit2.res)
+qqnorm(stock21.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock21.fit2.res, col = 'red')
+
+stock21.fit2.sigma.sqr <- stock21.fit2@sigma.t^2
+stock21.fit2.vol <- sqrt(stock21.fit2.sigma.sqr)
+stock21.fit2.sequence.mean <- mean(stock21.sqr/stock21.fit2.sigma.sqr); stock21.fit2.sequence.mean
+ts.plot(data.stock21)
+lines(stock21.fit2.vol, col = 'red')
+
+stock21.fit2.formula <- formula('~ garch(1, 1)')
+stock21.fit2.CV <- EWCV.GARCH(data.stock21, stock21.fit2.formula)
+```
+
+```{r Stock21 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock21.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(7, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock21.fit3 <- rugarch::ugarchfit(stock21.fit3.spec, data = data.stock21)
+infocriteria(stock21.fit3)
+
+stock21.fit3.res <- as.numeric(residuals(stock21.fit3, standardize = TRUE))
+acf(stock21.fit3.res)
+qqnorm(stock21.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock21.fit3.res, col = 'red')
+
+stock21.fit3.vol <- as.numeric(rugarch::sigma(stock21.fit3))
+stock21.fit3.sigma.sqr <- stock21.fit3.vol^2
+stock21.fit3.sequence.mean <- mean(stock21.sqr/stock21.fit3.sigma.sqr); stock21.fit3.sequence.mean
+ts.plot(data.stock21)
+lines(stock21.fit3.vol, col = 'red')
+
+stock21.fit3.CV <- EWCV.eGARCH(data.stock21, stock21.fit3.spec)
+```
+```{r Stock21 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock21.fit1.CV; stock21.fit2.CV; stock21.fit3.CV
+```
+
+## stock22
+```{r Stock22 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock22)
+ts.plot(data.stock22^2)
+acf(data.stock22)
+pacf(data.stock22)
+summary(ur.kpss(as.ts(data.stock22)))
+summary(ur.kpss(as.ts(data.stock22^2)))
+```
+```{r Stock22 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock22.sqr <- data.stock22$Value^2
+stock22.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock22, trace = FALSE)
+summary(stock22.fit1)
+stock22.fit1.res <- residuals(stock22.fit1, standardize = TRUE)
+acf(stock22.fit1.res)
+qqnorm(stock22.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock22.fit1.res, col = 'red')
+
+stock22.fit1.sigma.sqr <- stock22.fit1@sigma.t^2
+stock22.fit1.vol <- sqrt(stock22.fit1.sigma.sqr)
+stock22.fit1.sequence.mean <- mean(stock22.sqr/stock22.fit1.sigma.sqr); stock22.fit1.sequence.mean
+ts.plot(data.stock22)
+lines(stock22.fit1.vol, col = 'red')
+
+stock22.fit1.formula <- formula('~ garch(1, 0)')
+stock22.fit1.CV <- EWCV.GARCH(data.stock22, stock22.fit1.formula)
+```
+```{r Stock22 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock22.fit2 <- garchFit(formula = ~ garch(15, 7), data = data.stock22, trace = FALSE)
+summary(stock22.fit2)
+stock22.fit2.res <- residuals(stock22.fit2, standardize = TRUE)
+acf(stock22.fit2.res)
+qqnorm(stock22.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock22.fit2.res, col = 'red')
+
+stock22.fit2.sigma.sqr <- stock22.fit2@sigma.t^2
+stock22.fit2.vol <- sqrt(stock22.fit2.sigma.sqr)
+stock22.fit2.sequence.mean <- mean(stock22.sqr/stock22.fit2.sigma.sqr); stock22.fit2.sequence.mean
+ts.plot(data.stock22)
+lines(stock22.fit2.vol, col = 'red')
+
+stock22.fit2.formula <- formula('~ garch(1, 1)')
+stock22.fit2.CV <- EWCV.GARCH(data.stock22, stock22.fit2.formula)
+```
+
+```{r Stock22 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock22.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(10, 3)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock22.fit3 <- rugarch::ugarchfit(stock22.fit3.spec, data = data.stock22)
+infocriteria(stock22.fit3)
+
+stock22.fit3.res <- as.numeric(residuals(stock22.fit3, standardize = TRUE))
+acf(stock22.fit3.res)
+qqnorm(stock22.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock22.fit3.res, col = 'red')
+
+stock22.fit3.vol <- as.numeric(rugarch::sigma(stock22.fit3))
+stock22.fit3.sigma.sqr <- stock22.fit3.vol^2
+stock22.fit3.sequence.mean <- mean(stock22.sqr/stock22.fit3.sigma.sqr); stock22.fit3.sequence.mean
+ts.plot(data.stock22)
+lines(stock22.fit3.vol, col = 'red')
+
+stock22.fit3.CV <- EWCV.eGARCH(data.stock22, stock22.fit3.spec)
+```
+```{r Stock22 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock22.fit1.CV; stock22.fit2.CV; stock22.fit3.CV
+```
+
+## stock23
+```{r Stock23 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock23)
+ts.plot(data.stock23^2)
+acf(data.stock23)
+pacf(data.stock23)
+summary(ur.kpss(as.ts(data.stock23)))
+summary(ur.kpss(as.ts(data.stock23^2)))
+```
+```{r Stock23 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock23.sqr <- data.stock23$Value^2
+stock23.fit1 <- garchFit(formula = ~ garch(15, 0), data = data.stock23, trace = FALSE)
+summary(stock23.fit1)
+stock23.fit1.res <- residuals(stock23.fit1, standardize = TRUE)
+acf(stock23.fit1.res)
+qqnorm(stock23.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock23.fit1.res, col = 'red')
+
+stock23.fit1.sigma.sqr <- stock23.fit1@sigma.t^2
+stock23.fit1.vol <- sqrt(stock23.fit1.sigma.sqr)
+stock23.fit1.sequence.mean <- mean(stock23.sqr/stock23.fit1.sigma.sqr); stock23.fit1.sequence.mean
+ts.plot(data.stock23)
+lines(stock23.fit1.vol, col = 'red')
+
+stock23.fit1.formula <- formula('~ garch(1, 0)')
+stock23.fit1.CV <- EWCV.GARCH(data.stock23, stock23.fit1.formula)
+```
+```{r Stock23 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock23.fit2 <- garchFit(formula = ~ garch(15, 10), data = data.stock23, trace = FALSE)
+summary(stock23.fit2)
+stock23.fit2.res <- residuals(stock23.fit2, standardize = TRUE)
+acf(stock23.fit2.res)
+qqnorm(stock23.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock23.fit2.res, col = 'red')
+
+stock23.fit2.sigma.sqr <- stock23.fit2@sigma.t^2
+stock23.fit2.vol <- sqrt(stock23.fit2.sigma.sqr)
+stock23.fit2.sequence.mean <- mean(stock23.sqr/stock23.fit2.sigma.sqr); stock23.fit2.sequence.mean
+ts.plot(data.stock23)
+lines(stock23.fit2.vol, col = 'red')
+
+stock23.fit2.formula <- formula('~ garch(1, 1)')
+stock23.fit2.CV <- EWCV.GARCH(data.stock23, stock23.fit2.formula)
+```
+
+```{r Stock23 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock23.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(7, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock23.fit3 <- rugarch::ugarchfit(stock23.fit3.spec, data = data.stock23)
+infocriteria(stock23.fit3)
+
+stock23.fit3.res <- as.numeric(residuals(stock23.fit3, standardize = TRUE))
+acf(stock23.fit3.res)
+qqnorm(stock23.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock23.fit3.res, col = 'red')
+
+stock23.fit3.vol <- as.numeric(rugarch::sigma(stock23.fit3))
+stock23.fit3.sigma.sqr <- stock23.fit3.vol^2
+stock23.fit3.sequence.mean <- mean(stock23.sqr/stock23.fit3.sigma.sqr); stock23.fit3.sequence.mean
+ts.plot(data.stock23)
+lines(stock23.fit3.vol, col = 'red')
+
+stock23.fit3.CV <- EWCV.eGARCH(data.stock23, stock23.fit3.spec)
+```
+```{r Stock23 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock23.fit1.CV; stock23.fit2.CV; stock23.fit3.CV
+```
+
+## stock24
+```{r Stock24 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock24)
+ts.plot(data.stock24^2)
+acf(data.stock24)
+pacf(data.stock24)
+summary(ur.kpss(as.ts(data.stock24)))
+summary(ur.kpss(as.ts(data.stock24^2)))
+```
+```{r Stock24 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock24.sqr <- data.stock24$Value^2
+stock24.fit1 <- garchFit(formula = ~ garch(8, 0), data = data.stock24, trace = FALSE)
+summary(stock24.fit1)
+stock24.fit1.res <- residuals(stock24.fit1, standardize = TRUE)
+acf(stock24.fit1.res)
+qqnorm(stock24.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock24.fit1.res, col = 'red')
+
+stock24.fit1.sigma.sqr <- stock24.fit1@sigma.t^2
+stock24.fit1.vol <- sqrt(stock24.fit1.sigma.sqr)
+stock24.fit1.sequence.mean <- mean(stock24.sqr/stock24.fit1.sigma.sqr); stock24.fit1.sequence.mean
+ts.plot(data.stock24)
+lines(stock24.fit1.vol, col = 'red')
+
+stock24.fit1.formula <- formula('~ garch(1, 0)')
+stock24.fit1.CV <- EWCV.GARCH(data.stock24, stock24.fit1.formula)
+```
+```{r Stock24 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock24.fit2 <- garchFit(formula = ~ garch(3, 3), data = data.stock24, trace = FALSE)
+summary(stock24.fit2)
+stock24.fit2.res <- residuals(stock24.fit2, standardize = TRUE)
+acf(stock24.fit2.res)
+qqnorm(stock24.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock24.fit2.res, col = 'red')
+
+stock24.fit2.sigma.sqr <- stock24.fit2@sigma.t^2
+stock24.fit2.vol <- sqrt(stock24.fit2.sigma.sqr)
+stock24.fit2.sequence.mean <- mean(stock24.sqr/stock24.fit2.sigma.sqr); stock24.fit2.sequence.mean
+ts.plot(data.stock24)
+lines(stock24.fit2.vol, col = 'red')
+
+stock24.fit2.formula <- formula('~ garch(1, 1)')
+stock24.fit2.CV <- EWCV.GARCH(data.stock24, stock24.fit2.formula)
+```
+
+```{r Stock24 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock24.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(5, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock24.fit3 <- rugarch::ugarchfit(stock24.fit3.spec, data = data.stock24)
+infocriteria(stock24.fit3)
+
+stock24.fit3.res <- as.numeric(residuals(stock24.fit3, standardize = TRUE))
+acf(stock24.fit3.res)
+qqnorm(stock24.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock24.fit3.res, col = 'red')
+
+stock24.fit3.vol <- as.numeric(rugarch::sigma(stock24.fit3))
+stock24.fit3.sigma.sqr <- stock24.fit3.vol^2
+stock24.fit3.sequence.mean <- mean(stock24.sqr/stock24.fit3.sigma.sqr); stock24.fit3.sequence.mean
+ts.plot(data.stock24)
+lines(stock24.fit3.vol, col = 'red')
+
+stock24.fit3.CV <- EWCV.eGARCH(data.stock24, stock24.fit3.spec)
+```
+```{r Stock24 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock24.fit1.CV; stock24.fit2.CV; stock24.fit3.CV
+```
+
+## stock25
+```{r Stock25 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock25)
+ts.plot(data.stock25^2)
+acf(data.stock25)
+pacf(data.stock25)
+summary(ur.kpss(as.ts(data.stock25)))
+summary(ur.kpss(as.ts(data.stock25^2)))
+```
+```{r Stock25 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock25.sqr <- data.stock25$Value^2
+stock25.fit1 <- garchFit(formula = ~ garch(11, 0), data = data.stock25, trace = FALSE)
+summary(stock25.fit1)
+stock25.fit1.res <- residuals(stock25.fit1, standardize = TRUE)
+acf(stock25.fit1.res)
+qqnorm(stock25.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock25.fit1.res, col = 'red')
+
+stock25.fit1.sigma.sqr <- stock25.fit1@sigma.t^2
+stock25.fit1.vol <- sqrt(stock25.fit1.sigma.sqr)
+stock25.fit1.sequence.mean <- mean(stock25.sqr/stock25.fit1.sigma.sqr); stock25.fit1.sequence.mean
+ts.plot(data.stock25)
+lines(stock25.fit1.vol, col = 'red')
+
+stock25.fit1.formula <- formula('~ garch(1, 0)')
+stock25.fit1.CV <- EWCV.GARCH(data.stock25, stock25.fit1.formula)
+```
+```{r Stock25 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock25.fit2 <- garchFit(formula = ~ garch(11, 1), data = data.stock25, trace = FALSE)
+summary(stock25.fit2)
+stock25.fit2.res <- residuals(stock25.fit2, standardize = TRUE)
+acf(stock25.fit2.res)
+qqnorm(stock25.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock25.fit2.res, col = 'red')
+
+stock25.fit2.sigma.sqr <- stock25.fit2@sigma.t^2
+stock25.fit2.vol <- sqrt(stock25.fit2.sigma.sqr)
+stock25.fit2.sequence.mean <- mean(stock25.sqr/stock25.fit2.sigma.sqr); stock25.fit2.sequence.mean
+ts.plot(data.stock25)
+lines(stock25.fit2.vol, col = 'red')
+
+stock25.fit2.formula <- formula('~ garch(1, 1)')
+stock25.fit2.CV <- EWCV.GARCH(data.stock25, stock25.fit2.formula)
+```
+
+```{r Stock25 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock25.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(6, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock25.fit3 <- rugarch::ugarchfit(stock25.fit3.spec, data = data.stock25)
+infocriteria(stock25.fit3)
+
+stock25.fit3.res <- as.numeric(residuals(stock25.fit3, standardize = TRUE))
+acf(stock25.fit3.res)
+qqnorm(stock25.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock25.fit3.res, col = 'red')
+
+stock25.fit3.vol <- as.numeric(rugarch::sigma(stock25.fit3))
+stock25.fit3.sigma.sqr <- stock25.fit3.vol^2
+stock25.fit3.sequence.mean <- mean(stock25.sqr/stock25.fit3.sigma.sqr); stock25.fit3.sequence.mean
+ts.plot(data.stock25)
+lines(stock25.fit3.vol, col = 'red')
+
+stock25.fit3.CV <- EWCV.eGARCH(data.stock25, stock25.fit3.spec)
+```
+```{r Stock25 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock25.fit1.CV; stock25.fit2.CV; stock25.fit3.CV
+```
+
+## stock26
+```{r Stock26 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock26)
+ts.plot(data.stock26^2)
+acf(data.stock26)
+pacf(data.stock26)
+summary(ur.kpss(as.ts(data.stock26)))
+summary(ur.kpss(as.ts(data.stock26^2)))
+```
+```{r Stock26 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock26.sqr <- data.stock26$Value^2
+stock26.fit1 <- garchFit(formula = ~ garch(3, 0), data = data.stock26, trace = FALSE)
+summary(stock26.fit1)
+stock26.fit1.res <- residuals(stock26.fit1, standardize = TRUE)
+acf(stock26.fit1.res)
+qqnorm(stock26.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock26.fit1.res, col = 'red')
+
+stock26.fit1.sigma.sqr <- stock26.fit1@sigma.t^2
+stock26.fit1.vol <- sqrt(stock26.fit1.sigma.sqr)
+stock26.fit1.sequence.mean <- mean(stock26.sqr/stock26.fit1.sigma.sqr); stock26.fit1.sequence.mean
+ts.plot(data.stock26)
+lines(stock26.fit1.vol, col = 'red')
+
+stock26.fit1.formula <- formula('~ garch(1, 0)')
+stock26.fit1.CV <- EWCV.GARCH(data.stock26, stock26.fit1.formula)
+```
+```{r Stock26 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock26.fit2 <- garchFit(formula = ~ garch(3, 1), data = data.stock26, trace = FALSE)
+summary(stock26.fit2)
+stock26.fit2.res <- residuals(stock26.fit2, standardize = TRUE)
+acf(stock26.fit2.res)
+qqnorm(stock26.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock26.fit2.res, col = 'red')
+
+stock26.fit2.sigma.sqr <- stock26.fit2@sigma.t^2
+stock26.fit2.vol <- sqrt(stock26.fit2.sigma.sqr)
+stock26.fit2.sequence.mean <- mean(stock26.sqr/stock26.fit2.sigma.sqr); stock26.fit2.sequence.mean
+ts.plot(data.stock26)
+lines(stock26.fit2.vol, col = 'red')
+
+stock26.fit2.formula <- formula('~ garch(1, 1)')
+stock26.fit2.CV <- EWCV.GARCH(data.stock26, stock26.fit2.formula)
+```
+
+```{r Stock26 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock26.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(1, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock26.fit3 <- rugarch::ugarchfit(stock26.fit3.spec, data = data.stock26)
+infocriteria(stock26.fit3)
+
+stock26.fit3.res <- as.numeric(residuals(stock26.fit3, standardize = TRUE))
+acf(stock26.fit3.res)
+qqnorm(stock26.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock26.fit3.res, col = 'red')
+
+stock26.fit3.vol <- as.numeric(rugarch::sigma(stock26.fit3))
+stock26.fit3.sigma.sqr <- stock26.fit3.vol^2
+stock26.fit3.sequence.mean <- mean(stock26.sqr/stock26.fit3.sigma.sqr); stock26.fit3.sequence.mean
+ts.plot(data.stock26)
+lines(stock26.fit3.vol, col = 'red')
+
+stock26.fit3.CV <- EWCV.eGARCH(data.stock26, stock26.fit3.spec)
+```
+```{r Stock26 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock26.fit1.CV; stock26.fit2.CV; stock26.fit3.CV
+```
+
+## stock27
+```{r Stock27 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock27)
+ts.plot(data.stock27^2)
+acf(data.stock27)
+pacf(data.stock27)
+summary(ur.kpss(as.ts(data.stock27)))
+summary(ur.kpss(as.ts(data.stock27^2)))
+```
+```{r Stock27 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock27.sqr <- data.stock27$Value^2
+stock27.fit1 <- garchFit(formula = ~ garch(5, 0), data = data.stock27, trace = FALSE)
+summary(stock27.fit1)
+stock27.fit1.res <- residuals(stock27.fit1, standardize = TRUE)
+acf(stock27.fit1.res)
+qqnorm(stock27.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock27.fit1.res, col = 'red')
+
+stock27.fit1.sigma.sqr <- stock27.fit1@sigma.t^2
+stock27.fit1.vol <- sqrt(stock27.fit1.sigma.sqr)
+stock27.fit1.sequence.mean <- mean(stock27.sqr/stock27.fit1.sigma.sqr); stock27.fit1.sequence.mean
+ts.plot(data.stock27)
+lines(stock27.fit1.vol, col = 'red')
+
+stock27.fit1.formula <- formula('~ garch(1, 0)')
+stock27.fit1.CV <- EWCV.GARCH(data.stock27, stock27.fit1.formula)
+```
+```{r Stock27 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock27.fit2 <- garchFit(formula = ~ garch(10, 10), data = data.stock27, trace = FALSE)
+summary(stock27.fit2)
+stock27.fit2.res <- residuals(stock27.fit2, standardize = TRUE)
+acf(stock27.fit2.res)
+qqnorm(stock27.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock27.fit2.res, col = 'red')
+
+stock27.fit2.sigma.sqr <- stock27.fit2@sigma.t^2
+stock27.fit2.vol <- sqrt(stock27.fit2.sigma.sqr)
+stock27.fit2.sequence.mean <- mean(stock27.sqr/stock27.fit2.sigma.sqr); stock27.fit2.sequence.mean
+ts.plot(data.stock27)
+lines(stock27.fit2.vol, col = 'red')
+
+stock27.fit2.formula <- formula('~ garch(1, 1)')
+stock27.fit2.CV <- EWCV.GARCH(data.stock27, stock27.fit2.formula)
+```
+
+```{r Stock27 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock27.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(7, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock27.fit3 <- rugarch::ugarchfit(stock27.fit3.spec, data = data.stock27)
+infocriteria(stock27.fit3)
+
+stock27.fit3.res <- as.numeric(residuals(stock27.fit3, standardize = TRUE))
+acf(stock27.fit3.res)
+qqnorm(stock27.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock27.fit3.res, col = 'red')
+
+stock27.fit3.vol <- as.numeric(rugarch::sigma(stock27.fit3))
+stock27.fit3.sigma.sqr <- stock27.fit3.vol^2
+stock27.fit3.sequence.mean <- mean(stock27.sqr/stock27.fit3.sigma.sqr); stock27.fit3.sequence.mean
+ts.plot(data.stock27)
+lines(stock27.fit3.vol, col = 'red')
+
+stock27.fit3.CV <- EWCV.eGARCH(data.stock27, stock27.fit3.spec)
+```
+```{r Stock27 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock27.fit1.CV; stock27.fit2.CV; stock27.fit3.CV
+```
+
+## stock28
+```{r Stock28 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock28)
+ts.plot(data.stock28^2)
+acf(data.stock28)
+pacf(data.stock28)
+summary(ur.kpss(as.ts(data.stock28)))
+summary(ur.kpss(as.ts(data.stock28^2)))
+```
+```{r Stock28 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock28.sqr <- data.stock28$Value^2
+stock28.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock28, trace = FALSE)
+summary(stock28.fit1)
+stock28.fit1.res <- residuals(stock28.fit1, standardize = TRUE)
+acf(stock28.fit1.res)
+qqnorm(stock28.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock28.fit1.res, col = 'red')
+
+stock28.fit1.sigma.sqr <- stock28.fit1@sigma.t^2
+stock28.fit1.vol <- sqrt(stock28.fit1.sigma.sqr)
+stock28.fit1.sequence.mean <- mean(stock28.sqr/stock28.fit1.sigma.sqr); stock28.fit1.sequence.mean
+ts.plot(data.stock28)
+lines(stock28.fit1.vol, col = 'red')
+
+stock28.fit1.formula <- formula('~ garch(1, 0)')
+stock28.fit1.CV <- EWCV.GARCH(data.stock28, stock28.fit1.formula)
+```
+```{r Stock28 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock28.fit2 <- garchFit(formula = ~ garch(10, 5), data = data.stock28, trace = FALSE)
+summary(stock28.fit2)
+stock28.fit2.res <- residuals(stock28.fit2, standardize = TRUE)
+acf(stock28.fit2.res)
+qqnorm(stock28.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock28.fit2.res, col = 'red')
+
+stock28.fit2.sigma.sqr <- stock28.fit2@sigma.t^2
+stock28.fit2.vol <- sqrt(stock28.fit2.sigma.sqr)
+stock28.fit2.sequence.mean <- mean(stock28.sqr/stock28.fit2.sigma.sqr); stock28.fit2.sequence.mean
+ts.plot(data.stock28)
+lines(stock28.fit2.vol, col = 'red')
+
+stock28.fit2.formula <- formula('~ garch(1, 1)')
+stock28.fit2.CV <- EWCV.GARCH(data.stock28, stock28.fit2.formula)
+```
+
+```{r Stock28 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock28.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(7, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock28.fit3 <- rugarch::ugarchfit(stock28.fit3.spec, data = data.stock28)
+infocriteria(stock28.fit3)
+
+stock28.fit3.res <- as.numeric(residuals(stock28.fit3, standardize = TRUE))
+acf(stock28.fit3.res)
+qqnorm(stock28.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock28.fit3.res, col = 'red')
+
+stock28.fit3.vol <- as.numeric(rugarch::sigma(stock28.fit3))
+stock28.fit3.sigma.sqr <- stock28.fit3.vol^2
+stock28.fit3.sequence.mean <- mean(stock28.sqr/stock28.fit3.sigma.sqr); stock28.fit3.sequence.mean
+ts.plot(data.stock28)
+lines(stock28.fit3.vol, col = 'red')
+
+stock28.fit3.CV <- EWCV.eGARCH(data.stock28, stock28.fit3.spec)
+```
+```{r Stock28 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock28.fit1.CV; stock28.fit2.CV; stock28.fit3.CV
+```
+
+## stock29
+```{r Stock29 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock29)
+ts.plot(data.stock29^2)
+acf(data.stock29)
+pacf(data.stock29)
+summary(ur.kpss(as.ts(data.stock29)))
+summary(ur.kpss(as.ts(data.stock29^2)))
+```
+```{r Stock29 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock29.sqr <- data.stock29$Value^2
+stock29.fit1 <- garchFit(formula = ~ garch(9, 0), data = data.stock29, trace = FALSE)
+summary(stock29.fit1)
+stock29.fit1.res <- residuals(stock29.fit1, standardize = TRUE)
+acf(stock29.fit1.res)
+qqnorm(stock29.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock29.fit1.res, col = 'red')
+
+stock29.fit1.sigma.sqr <- stock29.fit1@sigma.t^2
+stock29.fit1.vol <- sqrt(stock29.fit1.sigma.sqr)
+stock29.fit1.sequence.mean <- mean(stock29.sqr/stock29.fit1.sigma.sqr); stock29.fit1.sequence.mean
+ts.plot(data.stock29)
+lines(stock29.fit1.vol, col = 'red')
+
+stock29.fit1.formula <- formula('~ garch(1, 0)')
+stock29.fit1.CV <- EWCV.GARCH(data.stock29, stock29.fit1.formula)
+```
+```{r Stock29 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock29.fit2 <- garchFit(formula = ~ garch(9, 1), data = data.stock29, trace = FALSE)
+summary(stock29.fit2)
+stock29.fit2.res <- residuals(stock29.fit2, standardize = TRUE)
+acf(stock29.fit2.res)
+qqnorm(stock29.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock29.fit2.res, col = 'red')
+
+stock29.fit2.sigma.sqr <- stock29.fit2@sigma.t^2
+stock29.fit2.vol <- sqrt(stock29.fit2.sigma.sqr)
+stock29.fit2.sequence.mean <- mean(stock29.sqr/stock29.fit2.sigma.sqr); stock29.fit2.sequence.mean
+ts.plot(data.stock29)
+lines(stock29.fit2.vol, col = 'red')
+
+stock29.fit2.formula <- formula('~ garch(1, 1)')
+stock29.fit2.CV <- EWCV.GARCH(data.stock29, stock29.fit2.formula)
+```
+
+```{r Stock29 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock29.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(5, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock29.fit3 <- rugarch::ugarchfit(stock29.fit3.spec, data = data.stock29)
+infocriteria(stock29.fit3)
+
+stock29.fit3.res <- as.numeric(residuals(stock29.fit3, standardize = TRUE))
+acf(stock29.fit3.res)
+qqnorm(stock29.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock29.fit3.res, col = 'red')
+
+stock29.fit3.vol <- as.numeric(rugarch::sigma(stock29.fit3))
+stock29.fit3.sigma.sqr <- stock29.fit3.vol^2
+stock29.fit3.sequence.mean <- mean(stock29.sqr/stock29.fit3.sigma.sqr); stock29.fit3.sequence.mean
+ts.plot(data.stock29)
+lines(stock29.fit3.vol, col = 'red')
+
+stock29.fit3.CV <- EWCV.eGARCH(data.stock29, stock29.fit3.spec)
+```
+```{r Stock29 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock29.fit1.CV; stock29.fit2.CV; stock29.fit3.CV
+```
+
+## stock30
+```{r Stock30 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock30)
+ts.plot(data.stock30^2)
+acf(data.stock30)
+pacf(data.stock30)
+summary(ur.kpss(as.ts(data.stock30)))
+summary(ur.kpss(as.ts(data.stock30^2)))
+```
+```{r Stock30 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock30.sqr <- data.stock30$Value^2
+stock30.fit1 <- garchFit(formula = ~ garch(5, 0), data = data.stock30, trace = FALSE)
+summary(stock30.fit1)
+stock30.fit1.res <- residuals(stock30.fit1, standardize = TRUE)
+acf(stock30.fit1.res)
+qqnorm(stock30.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock30.fit1.res, col = 'red')
+
+stock30.fit1.sigma.sqr <- stock30.fit1@sigma.t^2
+stock30.fit1.vol <- sqrt(stock30.fit1.sigma.sqr)
+stock30.fit1.sequence.mean <- mean(stock30.sqr/stock30.fit1.sigma.sqr); stock30.fit1.sequence.mean
+ts.plot(data.stock30)
+lines(stock30.fit1.vol, col = 'red')
+
+stock30.fit1.formula <- formula('~ garch(1, 0)')
+stock30.fit1.CV <- EWCV.GARCH(data.stock30, stock30.fit1.formula)
+```
+```{r Stock30 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock30.fit2 <- garchFit(formula = ~ garch(10, 10), data = data.stock30, trace = FALSE)
+summary(stock30.fit2)
+stock30.fit2.res <- residuals(stock30.fit2, standardize = TRUE)
+acf(stock30.fit2.res)
+qqnorm(stock30.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock30.fit2.res, col = 'red')
+
+stock30.fit2.sigma.sqr <- stock30.fit2@sigma.t^2
+stock30.fit2.vol <- sqrt(stock30.fit2.sigma.sqr)
+stock30.fit2.sequence.mean <- mean(stock30.sqr/stock30.fit2.sigma.sqr); stock30.fit2.sequence.mean
+ts.plot(data.stock30)
+lines(stock30.fit2.vol, col = 'red')
+
+stock30.fit2.formula <- formula('~ garch(1, 1)')
+stock30.fit2.CV <- EWCV.GARCH(data.stock30, stock30.fit2.formula)
+```
+
+```{r Stock30 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock30.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(9, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock30.fit3 <- rugarch::ugarchfit(stock30.fit3.spec, data = data.stock30)
+infocriteria(stock30.fit3)
+
+stock30.fit3.res <- as.numeric(residuals(stock30.fit3, standardize = TRUE))
+acf(stock30.fit3.res)
+qqnorm(stock30.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock30.fit3.res, col = 'red')
+
+stock30.fit3.vol <- as.numeric(rugarch::sigma(stock30.fit3))
+stock30.fit3.sigma.sqr <- stock30.fit3.vol^2
+stock30.fit3.sequence.mean <- mean(stock30.sqr/stock30.fit3.sigma.sqr); stock30.fit3.sequence.mean
+ts.plot(data.stock30)
+lines(stock30.fit3.vol, col = 'red')
+
+stock30.fit3.CV <- EWCV.eGARCH(data.stock30, stock30.fit3.spec)
+```
+```{r Stock30 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock30.fit1.CV; stock30.fit2.CV; stock30.fit3.CV
+```
+
+## stock31
+```{r Stock31 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock31)
+ts.plot(data.stock31^2)
+acf(data.stock31)
+pacf(data.stock31)
+summary(ur.kpss(as.ts(data.stock31)))
+summary(ur.kpss(as.ts(data.stock31^2)))
+```
+```{r Stock31 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock31.sqr <- data.stock31$Value^2
+stock31.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock31, trace = FALSE)
+summary(stock31.fit1)
+stock31.fit1.res <- residuals(stock31.fit1, standardize = TRUE)
+acf(stock31.fit1.res)
+qqnorm(stock31.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock31.fit1.res, col = 'red')
+
+stock31.fit1.sigma.sqr <- stock31.fit1@sigma.t^2
+stock31.fit1.vol <- sqrt(stock31.fit1.sigma.sqr)
+stock31.fit1.sequence.mean <- mean(stock31.sqr/stock31.fit1.sigma.sqr); stock31.fit1.sequence.mean
+ts.plot(data.stock31)
+lines(stock31.fit1.vol, col = 'red')
+
+stock31.fit1.formula <- formula('~ garch(1, 0)')
+stock31.fit1.CV <- EWCV.GARCH(data.stock31, stock31.fit1.formula)
+```
+```{r Stock31 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock31.fit2 <- garchFit(formula = ~ garch(10, 4), data = data.stock31, trace = FALSE)
+summary(stock31.fit2)
+stock31.fit2.res <- residuals(stock31.fit2, standardize = TRUE)
+acf(stock31.fit2.res)
+qqnorm(stock31.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock31.fit2.res, col = 'red')
+
+stock31.fit2.sigma.sqr <- stock31.fit2@sigma.t^2
+stock31.fit2.vol <- sqrt(stock31.fit2.sigma.sqr)
+stock31.fit2.sequence.mean <- mean(stock31.sqr/stock31.fit2.sigma.sqr); stock31.fit2.sequence.mean
+ts.plot(data.stock31)
+lines(stock31.fit2.vol, col = 'red')
+
+stock31.fit2.formula <- formula('~ garch(1, 1)')
+stock31.fit2.CV <- EWCV.GARCH(data.stock31, stock31.fit2.formula)
+```
+
+```{r Stock31 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock31.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(8, 3)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock31.fit3 <- rugarch::ugarchfit(stock31.fit3.spec, data = data.stock31)
+infocriteria(stock31.fit3)
+
+stock31.fit3.res <- as.numeric(residuals(stock31.fit3, standardize = TRUE))
+acf(stock31.fit3.res)
+qqnorm(stock31.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock31.fit3.res, col = 'red')
+
+stock31.fit3.vol <- as.numeric(rugarch::sigma(stock31.fit3))
+stock31.fit3.sigma.sqr <- stock31.fit3.vol^2
+stock31.fit3.sequence.mean <- mean(stock31.sqr/stock31.fit3.sigma.sqr); stock31.fit3.sequence.mean
+ts.plot(data.stock31)
+lines(stock31.fit3.vol, col = 'red')
+
+stock31.fit3.CV <- EWCV.eGARCH(data.stock31, stock31.fit3.spec)
+```
+```{r Stock31 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock31.fit1.CV; stock31.fit2.CV; stock31.fit3.CV
+```
+
+## stock32
+```{r Stock32 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock32)
+ts.plot(data.stock32^2)
+acf(data.stock32)
+pacf(data.stock32)
+summary(ur.kpss(as.ts(data.stock32)))
+summary(ur.kpss(as.ts(data.stock32^2)))
+```
+```{r Stock32 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock32.sqr <- data.stock32$Value^2
+stock32.fit1 <- garchFit(formula = ~ garch(5, 0), data = data.stock32, trace = FALSE)
+summary(stock32.fit1)
+stock32.fit1.res <- residuals(stock32.fit1, standardize = TRUE)
+acf(stock32.fit1.res)
+qqnorm(stock32.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock32.fit1.res, col = 'red')
+
+stock32.fit1.sigma.sqr <- stock32.fit1@sigma.t^2
+stock32.fit1.vol <- sqrt(stock32.fit1.sigma.sqr)
+stock32.fit1.sequence.mean <- mean(stock32.sqr/stock32.fit1.sigma.sqr); stock32.fit1.sequence.mean
+ts.plot(data.stock32)
+lines(stock32.fit1.vol, col = 'red')
+
+stock32.fit1.formula <- formula('~ garch(1, 0)')
+stock32.fit1.CV <- EWCV.GARCH(data.stock32, stock32.fit1.formula)
+```
+```{r Stock32 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock32.fit2 <- garchFit(formula = ~ garch(5, 2), data = data.stock32, trace = FALSE)
+summary(stock32.fit2)
+stock32.fit2.res <- residuals(stock32.fit2, standardize = TRUE)
+acf(stock32.fit2.res)
+qqnorm(stock32.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock32.fit2.res, col = 'red')
+
+stock32.fit2.sigma.sqr <- stock32.fit2@sigma.t^2
+stock32.fit2.vol <- sqrt(stock32.fit2.sigma.sqr)
+stock32.fit2.sequence.mean <- mean(stock32.sqr/stock32.fit2.sigma.sqr); stock32.fit2.sequence.mean
+ts.plot(data.stock32)
+lines(stock32.fit2.vol, col = 'red')
+
+stock32.fit2.formula <- formula('~ garch(1, 1)')
+stock32.fit2.CV <- EWCV.GARCH(data.stock32, stock32.fit2.formula)
+```
+
+```{r Stock32 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock32.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(6, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock32.fit3 <- rugarch::ugarchfit(stock32.fit3.spec, data = data.stock32)
+infocriteria(stock32.fit3)
+
+stock32.fit3.res <- as.numeric(residuals(stock32.fit3, standardize = TRUE))
+acf(stock32.fit3.res)
+qqnorm(stock32.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock32.fit3.res, col = 'red')
+
+stock32.fit3.vol <- as.numeric(rugarch::sigma(stock32.fit3))
+stock32.fit3.sigma.sqr <- stock32.fit3.vol^2
+stock32.fit3.sequence.mean <- mean(stock32.sqr/stock32.fit3.sigma.sqr); stock32.fit3.sequence.mean
+ts.plot(data.stock32)
+lines(stock32.fit3.vol, col = 'red')
+
+stock32.fit3.CV <- EWCV.eGARCH(data.stock32, stock32.fit3.spec)
+```
+```{r Stock32 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock32.fit1.CV; stock32.fit2.CV; stock32.fit3.CV
+```
+
+## stock33
+```{r Stock33 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock33)
+ts.plot(data.stock33^2)
+acf(data.stock33)
+pacf(data.stock33)
+summary(ur.kpss(as.ts(data.stock33)))
+summary(ur.kpss(as.ts(data.stock33^2)))
+```
+```{r Stock33 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock33.sqr <- data.stock33$Value^2
+stock33.fit1 <- garchFit(formula = ~ garch(5, 0), data = data.stock33, trace = FALSE)
+summary(stock33.fit1)
+stock33.fit1.res <- residuals(stock33.fit1, standardize = TRUE)
+acf(stock33.fit1.res)
+qqnorm(stock33.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock33.fit1.res, col = 'red')
+
+stock33.fit1.sigma.sqr <- stock33.fit1@sigma.t^2
+stock33.fit1.vol <- sqrt(stock33.fit1.sigma.sqr)
+stock33.fit1.sequence.mean <- mean(stock33.sqr/stock33.fit1.sigma.sqr); stock33.fit1.sequence.mean
+ts.plot(data.stock33)
+lines(stock33.fit1.vol, col = 'red')
+
+stock33.fit1.formula <- formula('~ garch(1, 0)')
+stock33.fit1.CV <- EWCV.GARCH(data.stock33, stock33.fit1.formula)
+```
+```{r Stock33 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock33.fit2 <- garchFit(formula = ~ garch(10, 1), data = data.stock33, trace = FALSE)
+summary(stock33.fit2)
+stock33.fit2.res <- residuals(stock33.fit2, standardize = TRUE)
+acf(stock33.fit2.res)
+qqnorm(stock33.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock33.fit2.res, col = 'red')
+
+stock33.fit2.sigma.sqr <- stock33.fit2@sigma.t^2
+stock33.fit2.vol <- sqrt(stock33.fit2.sigma.sqr)
+stock33.fit2.sequence.mean <- mean(stock33.sqr/stock33.fit2.sigma.sqr); stock33.fit2.sequence.mean
+ts.plot(data.stock33)
+lines(stock33.fit2.vol, col = 'red')
+
+stock33.fit2.formula <- formula('~ garch(1, 1)')
+stock33.fit2.CV <- EWCV.GARCH(data.stock33, stock33.fit2.formula)
+```
+
+```{r Stock33 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock33.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(9, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock33.fit3 <- rugarch::ugarchfit(stock33.fit3.spec, data = data.stock33)
+infocriteria(stock33.fit3)
+
+stock33.fit3.res <- as.numeric(residuals(stock33.fit3, standardize = TRUE))
+acf(stock33.fit3.res)
+qqnorm(stock33.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock33.fit3.res, col = 'red')
+
+stock33.fit3.vol <- as.numeric(rugarch::sigma(stock33.fit3))
+stock33.fit3.sigma.sqr <- stock33.fit3.vol^2
+stock33.fit3.sequence.mean <- mean(stock33.sqr/stock33.fit3.sigma.sqr); stock33.fit3.sequence.mean
+ts.plot(data.stock33)
+lines(stock33.fit3.vol, col = 'red')
+
+stock33.fit3.CV <- EWCV.eGARCH(data.stock33, stock33.fit3.spec)
+```
+```{r Stock33 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock33.fit1.CV; stock33.fit2.CV; stock33.fit3.CV
+```
+
+## stock34
+```{r Stock34 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock34)
+ts.plot(data.stock34^2)
+acf(data.stock34)
+pacf(data.stock34)
+summary(ur.kpss(as.ts(data.stock34)))
+summary(ur.kpss(as.ts(data.stock34^2)))
+```
+```{r Stock34 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock34.sqr <- data.stock34$Value^2
+stock34.fit1 <- garchFit(formula = ~ garch(5, 0), data = data.stock34, trace = FALSE)
+summary(stock34.fit1)
+stock34.fit1.res <- residuals(stock34.fit1, standardize = TRUE)
+acf(stock34.fit1.res)
+qqnorm(stock34.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock34.fit1.res, col = 'red')
+
+stock34.fit1.sigma.sqr <- stock34.fit1@sigma.t^2
+stock34.fit1.vol <- sqrt(stock34.fit1.sigma.sqr)
+stock34.fit1.sequence.mean <- mean(stock34.sqr/stock34.fit1.sigma.sqr); stock34.fit1.sequence.mean
+ts.plot(data.stock34)
+lines(stock34.fit1.vol, col = 'red')
+
+stock34.fit1.formula <- formula('~ garch(1, 0)')
+stock34.fit1.CV <- EWCV.GARCH(data.stock34, stock34.fit1.formula)
+```
+```{r Stock34 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock34.fit2 <- garchFit(formula = ~ garch(5, 5), data = data.stock34, trace = FALSE)
+summary(stock34.fit2)
+stock34.fit2.res <- residuals(stock34.fit2, standardize = TRUE)
+acf(stock34.fit2.res)
+qqnorm(stock34.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock34.fit2.res, col = 'red')
+
+stock34.fit2.sigma.sqr <- stock34.fit2@sigma.t^2
+stock34.fit2.vol <- sqrt(stock34.fit2.sigma.sqr)
+stock34.fit2.sequence.mean <- mean(stock34.sqr/stock34.fit2.sigma.sqr); stock34.fit2.sequence.mean
+ts.plot(data.stock34)
+lines(stock34.fit2.vol, col = 'red')
+
+stock34.fit2.formula <- formula('~ garch(1, 1)')
+stock34.fit2.CV <- EWCV.GARCH(data.stock34, stock34.fit2.formula)
+```
+
+```{r Stock34 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock34.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(7, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock34.fit3 <- rugarch::ugarchfit(stock34.fit3.spec, data = data.stock34)
+infocriteria(stock34.fit3)
+
+stock34.fit3.res <- as.numeric(residuals(stock34.fit3, standardize = TRUE))
+acf(stock34.fit3.res)
+qqnorm(stock34.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock34.fit3.res, col = 'red')
+
+stock34.fit3.vol <- as.numeric(rugarch::sigma(stock34.fit3))
+stock34.fit3.sigma.sqr <- stock34.fit3.vol^2
+stock34.fit3.sequence.mean <- mean(stock34.sqr/stock34.fit3.sigma.sqr); stock34.fit3.sequence.mean
+ts.plot(data.stock34)
+lines(stock34.fit3.vol, col = 'red')
+
+stock34.fit3.CV <- EWCV.eGARCH(data.stock34, stock34.fit3.spec)
+```
+```{r Stock34 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock34.fit1.CV; stock34.fit2.CV; stock34.fit3.CV
+```
+
+## stock35
+```{r Stock35 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock35)
+ts.plot(data.stock35^2)
+acf(data.stock35)
+pacf(data.stock35)
+summary(ur.kpss(as.ts(data.stock35)))
+summary(ur.kpss(as.ts(data.stock35^2)))
+```
+```{r Stock35 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock35.sqr <- data.stock35$Value^2
+stock35.fit1 <- garchFit(formula = ~ garch(5, 0), data = data.stock35, trace = FALSE)
+summary(stock35.fit1)
+stock35.fit1.res <- residuals(stock35.fit1, standardize = TRUE)
+acf(stock35.fit1.res)
+qqnorm(stock35.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock35.fit1.res, col = 'red')
+
+stock35.fit1.sigma.sqr <- stock35.fit1@sigma.t^2
+stock35.fit1.vol <- sqrt(stock35.fit1.sigma.sqr)
+stock35.fit1.sequence.mean <- mean(stock35.sqr/stock35.fit1.sigma.sqr); stock35.fit1.sequence.mean
+ts.plot(data.stock35)
+lines(stock35.fit1.vol, col = 'red')
+
+stock35.fit1.formula <- formula('~ garch(1, 0)')
+stock35.fit1.CV <- EWCV.GARCH(data.stock35, stock35.fit1.formula)
+```
+```{r Stock35 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock35.fit2 <- garchFit(formula = ~ garch(10, 1), data = data.stock35, trace = FALSE)
+summary(stock35.fit2)
+stock35.fit2.res <- residuals(stock35.fit2, standardize = TRUE)
+acf(stock35.fit2.res)
+qqnorm(stock35.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock35.fit2.res, col = 'red')
+
+stock35.fit2.sigma.sqr <- stock35.fit2@sigma.t^2
+stock35.fit2.vol <- sqrt(stock35.fit2.sigma.sqr)
+stock35.fit2.sequence.mean <- mean(stock35.sqr/stock35.fit2.sigma.sqr); stock35.fit2.sequence.mean
+ts.plot(data.stock35)
+lines(stock35.fit2.vol, col = 'red')
+
+stock35.fit2.formula <- formula('~ garch(1, 1)')
+stock35.fit2.CV <- EWCV.GARCH(data.stock35, stock35.fit2.formula)
+```
+
+```{r Stock35 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock35.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(8, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock35.fit3 <- rugarch::ugarchfit(stock35.fit3.spec, data = data.stock35)
+infocriteria(stock35.fit3)
+
+stock35.fit3.res <- as.numeric(residuals(stock35.fit3, standardize = TRUE))
+acf(stock35.fit3.res)
+qqnorm(stock35.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock35.fit3.res, col = 'red')
+
+stock35.fit3.vol <- as.numeric(rugarch::sigma(stock35.fit3))
+stock35.fit3.sigma.sqr <- stock35.fit3.vol^2
+stock35.fit3.sequence.mean <- mean(stock35.sqr/stock35.fit3.sigma.sqr); stock35.fit3.sequence.mean
+ts.plot(data.stock35)
+lines(stock35.fit3.vol, col = 'red')
+
+stock35.fit3.CV <- EWCV.eGARCH(data.stock35, stock35.fit3.spec)
+```
+```{r Stock35 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock35.fit1.CV; stock35.fit2.CV; stock35.fit3.CV
+```
+
+## stock36
+```{r Stock36 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock36)
+ts.plot(data.stock36^2)
+acf(data.stock36)
+pacf(data.stock36)
+summary(ur.kpss(as.ts(data.stock36)))
+summary(ur.kpss(as.ts(data.stock36^2)))
+```
+```{r Stock36 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock36.sqr <- data.stock36$Value^2
+stock36.fit1 <- garchFit(formula = ~ garch(5, 0), data = data.stock36, trace = FALSE)
+summary(stock36.fit1)
+stock36.fit1.res <- residuals(stock36.fit1, standardize = TRUE)
+acf(stock36.fit1.res)
+qqnorm(stock36.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock36.fit1.res, col = 'red')
+
+stock36.fit1.sigma.sqr <- stock36.fit1@sigma.t^2
+stock36.fit1.vol <- sqrt(stock36.fit1.sigma.sqr)
+stock36.fit1.sequence.mean <- mean(stock36.sqr/stock36.fit1.sigma.sqr); stock36.fit1.sequence.mean
+ts.plot(data.stock36)
+lines(stock36.fit1.vol, col = 'red')
+
+stock36.fit1.formula <- formula('~ garch(1, 0)')
+stock36.fit1.CV <- EWCV.GARCH(data.stock36, stock36.fit1.formula)
+```
+```{r Stock36 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock36.fit2 <- garchFit(formula = ~ garch(10, 4), data = data.stock36, trace = FALSE)
+summary(stock36.fit2)
+stock36.fit2.res <- residuals(stock36.fit2, standardize = TRUE)
+acf(stock36.fit2.res)
+qqnorm(stock36.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock36.fit2.res, col = 'red')
+
+stock36.fit2.sigma.sqr <- stock36.fit2@sigma.t^2
+stock36.fit2.vol <- sqrt(stock36.fit2.sigma.sqr)
+stock36.fit2.sequence.mean <- mean(stock36.sqr/stock36.fit2.sigma.sqr); stock36.fit2.sequence.mean
+ts.plot(data.stock36)
+lines(stock36.fit2.vol, col = 'red')
+
+stock36.fit2.formula <- formula('~ garch(1, 1)')
+stock36.fit2.CV <- EWCV.GARCH(data.stock36, stock36.fit2.formula)
+```
+
+```{r Stock36 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock36.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(10, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock36.fit3 <- rugarch::ugarchfit(stock36.fit3.spec, data = data.stock36)
+infocriteria(stock36.fit3)
+
+stock36.fit3.res <- as.numeric(residuals(stock36.fit3, standardize = TRUE))
+acf(stock36.fit3.res)
+qqnorm(stock36.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock36.fit3.res, col = 'red')
+
+stock36.fit3.vol <- as.numeric(rugarch::sigma(stock36.fit3))
+stock36.fit3.sigma.sqr <- stock36.fit3.vol^2
+stock36.fit3.sequence.mean <- mean(stock36.sqr/stock36.fit3.sigma.sqr); stock36.fit3.sequence.mean
+ts.plot(data.stock36)
+lines(stock36.fit3.vol, col = 'red')
+
+stock36.fit3.CV <- EWCV.eGARCH(data.stock36, stock36.fit3.spec)
+```
+```{r Stock36 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock36.fit1.CV; stock36.fit2.CV; stock36.fit3.CV
+```
+
+## stock37
+```{r Stock37 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock37)
+ts.plot(data.stock37^2)
+acf(data.stock37)
+pacf(data.stock37)
+summary(ur.kpss(as.ts(data.stock37)))
+summary(ur.kpss(as.ts(data.stock37^2)))
+```
+```{r Stock37 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock37.sqr <- data.stock37$Value^2
+stock37.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock37, trace = FALSE)
+summary(stock37.fit1)
+stock37.fit1.res <- residuals(stock37.fit1, standardize = TRUE)
+acf(stock37.fit1.res)
+qqnorm(stock37.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock37.fit1.res, col = 'red')
+
+stock37.fit1.sigma.sqr <- stock37.fit1@sigma.t^2
+stock37.fit1.vol <- sqrt(stock37.fit1.sigma.sqr)
+stock37.fit1.sequence.mean <- mean(stock37.sqr/stock37.fit1.sigma.sqr); stock37.fit1.sequence.mean
+ts.plot(data.stock37)
+lines(stock37.fit1.vol, col = 'red')
+
+stock37.fit1.formula <- formula('~ garch(1, 0)')
+stock37.fit1.CV <- EWCV.GARCH(data.stock37, stock37.fit1.formula)
+```
+```{r Stock37 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock37.fit2 <- garchFit(formula = ~ garch(10, 10), data = data.stock37, trace = FALSE)
+summary(stock37.fit2)
+stock37.fit2.res <- residuals(stock37.fit2, standardize = TRUE)
+acf(stock37.fit2.res)
+qqnorm(stock37.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock37.fit2.res, col = 'red')
+
+stock37.fit2.sigma.sqr <- stock37.fit2@sigma.t^2
+stock37.fit2.vol <- sqrt(stock37.fit2.sigma.sqr)
+stock37.fit2.sequence.mean <- mean(stock37.sqr/stock37.fit2.sigma.sqr); stock37.fit2.sequence.mean
+ts.plot(data.stock37)
+lines(stock37.fit2.vol, col = 'red')
+
+stock37.fit2.formula <- formula('~ garch(1, 1)')
+stock37.fit2.CV <- EWCV.GARCH(data.stock37, stock37.fit2.formula)
+```
+
+```{r Stock37 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock37.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(9, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock37.fit3 <- rugarch::ugarchfit(stock37.fit3.spec, data = data.stock37)
+infocriteria(stock37.fit3)
+
+stock37.fit3.res <- as.numeric(residuals(stock37.fit3, standardize = TRUE))
+acf(stock37.fit3.res)
+qqnorm(stock37.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock37.fit3.res, col = 'red')
+
+stock37.fit3.vol <- as.numeric(rugarch::sigma(stock37.fit3))
+stock37.fit3.sigma.sqr <- stock37.fit3.vol^2
+stock37.fit3.sequence.mean <- mean(stock37.sqr/stock37.fit3.sigma.sqr); stock37.fit3.sequence.mean
+ts.plot(data.stock37)
+lines(stock37.fit3.vol, col = 'red')
+
+stock37.fit3.CV <- EWCV.eGARCH(data.stock37, stock37.fit3.spec)
+```
+```{r Stock37 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock37.fit1.CV; stock37.fit2.CV; stock37.fit3.CV
+```
+
+## stock38
+```{r Stock38 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock38)
+ts.plot(data.stock38^2)
+acf(data.stock38)
+pacf(data.stock38)
+summary(ur.kpss(as.ts(data.stock38)))
+summary(ur.kpss(as.ts(data.stock38^2)))
+```
+```{r Stock38 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock38.sqr <- data.stock38$Value^2
+stock38.fit1 <- garchFit(formula = ~ garch(10, 0), data = data.stock38, trace = FALSE)
+summary(stock38.fit1)
+stock38.fit1.res <- residuals(stock38.fit1, standardize = TRUE)
+acf(stock38.fit1.res)
+qqnorm(stock38.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock38.fit1.res, col = 'red')
+
+stock38.fit1.sigma.sqr <- stock38.fit1@sigma.t^2
+stock38.fit1.vol <- sqrt(stock38.fit1.sigma.sqr)
+stock38.fit1.sequence.mean <- mean(stock38.sqr/stock38.fit1.sigma.sqr); stock38.fit1.sequence.mean
+ts.plot(data.stock38)
+lines(stock38.fit1.vol, col = 'red')
+
+stock38.fit1.formula <- formula('~ garch(1, 0)')
+stock38.fit1.CV <- EWCV.GARCH(data.stock38, stock38.fit1.formula)
+```
+```{r Stock38 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock38.fit2 <- garchFit(formula = ~ garch(10, 10), data = data.stock38, trace = FALSE)
+summary(stock38.fit2)
+stock38.fit2.res <- residuals(stock38.fit2, standardize = TRUE)
+acf(stock38.fit2.res)
+qqnorm(stock38.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock38.fit2.res, col = 'red')
+
+stock38.fit2.sigma.sqr <- stock38.fit2@sigma.t^2
+stock38.fit2.vol <- sqrt(stock38.fit2.sigma.sqr)
+stock38.fit2.sequence.mean <- mean(stock38.sqr/stock38.fit2.sigma.sqr); stock38.fit2.sequence.mean
+ts.plot(data.stock38)
+lines(stock38.fit2.vol, col = 'red')
+
+stock38.fit2.formula <- formula('~ garch(1, 1)')
+stock38.fit2.CV <- EWCV.GARCH(data.stock38, stock38.fit2.formula)
+```
+
+```{r Stock38 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock38.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(5, 2)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock38.fit3 <- rugarch::ugarchfit(stock38.fit3.spec, data = data.stock38)
+infocriteria(stock38.fit3)
+
+stock38.fit3.res <- as.numeric(residuals(stock38.fit3, standardize = TRUE))
+acf(stock38.fit3.res)
+qqnorm(stock38.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock38.fit3.res, col = 'red')
+
+stock38.fit3.vol <- as.numeric(rugarch::sigma(stock38.fit3))
+stock38.fit3.sigma.sqr <- stock38.fit3.vol^2
+stock38.fit3.sequence.mean <- mean(stock38.sqr/stock38.fit3.sigma.sqr); stock38.fit3.sequence.mean
+ts.plot(data.stock38)
+lines(stock38.fit3.vol, col = 'red')
+
+stock38.fit3.CV <- EWCV.eGARCH(data.stock38, stock38.fit3.spec)
+```
+```{r Stock38 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock38.fit1.CV; stock38.fit2.CV; stock38.fit3.CV
+```
+
+## stock39
+```{r Stock39 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock39)
+ts.plot(data.stock39^2)
+acf(data.stock39)
+pacf(data.stock39)
+summary(ur.kpss(as.ts(data.stock39)))
+summary(ur.kpss(as.ts(data.stock39^2)))
+```
+```{r Stock39 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock39.sqr <- data.stock39$Value^2
+stock39.fit1 <- garchFit(formula = ~ garch(8, 0), data = data.stock39, trace = FALSE)
+summary(stock39.fit1)
+stock39.fit1.res <- residuals(stock39.fit1, standardize = TRUE)
+acf(stock39.fit1.res)
+qqnorm(stock39.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock39.fit1.res, col = 'red')
+
+stock39.fit1.sigma.sqr <- stock39.fit1@sigma.t^2
+stock39.fit1.vol <- sqrt(stock39.fit1.sigma.sqr)
+stock39.fit1.sequence.mean <- mean(stock39.sqr/stock39.fit1.sigma.sqr); stock39.fit1.sequence.mean
+ts.plot(data.stock39)
+lines(stock39.fit1.vol, col = 'red')
+
+stock39.fit1.formula <- formula('~ garch(1, 0)')
+stock39.fit1.CV <- EWCV.GARCH(data.stock39, stock39.fit1.formula)
+```
+```{r Stock39 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock39.fit2 <- garchFit(formula = ~ garch(15, 10), data = data.stock39, trace = FALSE)
+summary(stock39.fit2)
+stock39.fit2.res <- residuals(stock39.fit2, standardize = TRUE)
+acf(stock39.fit2.res)
+qqnorm(stock39.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock39.fit2.res, col = 'red')
+
+stock39.fit2.sigma.sqr <- stock39.fit2@sigma.t^2
+stock39.fit2.vol <- sqrt(stock39.fit2.sigma.sqr)
+stock39.fit2.sequence.mean <- mean(stock39.sqr/stock39.fit2.sigma.sqr); stock39.fit2.sequence.mean
+ts.plot(data.stock39)
+lines(stock39.fit2.vol, col = 'red')
+
+stock39.fit2.formula <- formula('~ garch(1, 1)')
+stock39.fit2.CV <- EWCV.GARCH(data.stock39, stock39.fit2.formula)
+```
+
+```{r Stock39 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock39.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(9, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock39.fit3 <- rugarch::ugarchfit(stock39.fit3.spec, data = data.stock39)
+infocriteria(stock39.fit3)
+
+stock39.fit3.res <- as.numeric(residuals(stock39.fit3, standardize = TRUE))
+acf(stock39.fit3.res)
+qqnorm(stock39.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock39.fit3.res, col = 'red')
+
+stock39.fit3.vol <- as.numeric(rugarch::sigma(stock39.fit3))
+stock39.fit3.sigma.sqr <- stock39.fit3.vol^2
+stock39.fit3.sequence.mean <- mean(stock39.sqr/stock39.fit3.sigma.sqr); stock39.fit3.sequence.mean
+ts.plot(data.stock39)
+lines(stock39.fit3.vol, col = 'red')
+
+stock39.fit3.CV <- EWCV.eGARCH(data.stock39, stock39.fit3.spec)
+```
+```{r Stock39 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock39.fit1.CV; stock39.fit2.CV; stock39.fit3.CV
+```
+
+## stock40
+```{r Stock40 Plot the series, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+ts.plot(data.stock40)
+ts.plot(data.stock40^2)
+acf(data.stock40)
+pacf(data.stock40)
+summary(ur.kpss(as.ts(data.stock40)))
+summary(ur.kpss(as.ts(data.stock40^2)))
+```
+```{r Stock40 fit a model1, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock40.sqr <- data.stock40$Value^2
+stock40.fit1 <- garchFit(formula = ~ garch(15, 0), data = data.stock40, trace = FALSE)
+summary(stock40.fit1)
+stock40.fit1.res <- residuals(stock40.fit1, standardize = TRUE)
+acf(stock40.fit1.res)
+qqnorm(stock40.fit1.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock40.fit1.res, col = 'red')
+
+stock40.fit1.sigma.sqr <- stock40.fit1@sigma.t^2
+stock40.fit1.vol <- sqrt(stock40.fit1.sigma.sqr)
+stock40.fit1.sequence.mean <- mean(stock40.sqr/stock40.fit1.sigma.sqr); stock40.fit1.sequence.mean
+ts.plot(data.stock40)
+lines(stock40.fit1.vol, col = 'red')
+
+stock40.fit1.formula <- formula('~ garch(1, 0)')
+stock40.fit1.CV <- EWCV.GARCH(data.stock40, stock40.fit1.formula)
+```
+```{r Stock40 fit a model2, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock40.fit2 <- garchFit(formula = ~ garch(15, 10), data = data.stock40, trace = FALSE)
+summary(stock40.fit2)
+stock40.fit2.res <- residuals(stock40.fit2, standardize = TRUE)
+acf(stock40.fit2.res)
+qqnorm(stock40.fit2.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock40.fit2.res, col = 'red')
+
+stock40.fit2.sigma.sqr <- stock40.fit2@sigma.t^2
+stock40.fit2.vol <- sqrt(stock40.fit2.sigma.sqr)
+stock40.fit2.sequence.mean <- mean(stock40.sqr/stock40.fit2.sigma.sqr); stock40.fit2.sequence.mean
+ts.plot(data.stock40)
+lines(stock40.fit2.vol, col = 'red')
+
+stock40.fit2.formula <- formula('~ garch(1, 1)')
+stock40.fit2.CV <- EWCV.GARCH(data.stock40, stock40.fit2.formula)
+```
+
+```{r Stock40 fit a model3, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock40.fit3.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(5, 1)),
+                                        mean.model = list(armaOrder = c(0, 0)))
+stock40.fit3 <- rugarch::ugarchfit(stock40.fit3.spec, data = data.stock40)
+infocriteria(stock40.fit3)
+
+stock40.fit3.res <- as.numeric(residuals(stock40.fit3, standardize = TRUE))
+acf(stock40.fit3.res)
+qqnorm(stock40.fit3.res, main = 'Normal Q-Q Plot of Std Residuals')
+qqline(stock40.fit3.res, col = 'red')
+
+stock40.fit3.vol <- as.numeric(rugarch::sigma(stock40.fit3))
+stock40.fit3.sigma.sqr <- stock40.fit3.vol^2
+stock40.fit3.sequence.mean <- mean(stock40.sqr/stock40.fit3.sigma.sqr); stock40.fit3.sequence.mean
+ts.plot(data.stock40)
+lines(stock40.fit3.vol, col = 'red')
+
+stock40.fit3.CV <- EWCV.eGARCH(data.stock40, stock40.fit3.spec)
+```
+```{r Stock40 Comparison overall, fig.height=4, message=FALSE, warning=FALSE, cache=TRUE}
+stock40.fit1.CV; stock40.fit2.CV; stock40.fit3.CV
+```
+
+## Calculate the VaR using each model
+
+* Stock 1 model: stock1.fit1
+* Stock 2 model: stock2.fit1
+* Stock 3 model: stock3.fit3
+* Stock 4 model: stock4.fit3
+* Stock 5 model: stock5.fit3
+* Stock 6 model: stock6.fit3
+* Stock 7 model: stock7.fit3
+* Stock 8 model: stock8.fit3
+* Stock 9 model: stock9.fit3
+* Stock 10 model: stock10.fit3
+* Stock 11 model: stock11.fit3
+* Stock 12 model: stock12.fit3
+* Stock 13 model: stock13.fit3
+* Stock 14 model: stock14.fit3
+* Stock 15 model: stock15.fit3
+* Stock 16 model: stock16.fit3
+* Stock 17 model: stock17.fit3
+* Stock 18 model: stock18.fit3
+* Stock 19 model: stock19.fit3
+* Stock 20 model: stock20.fit3
+* Stock 21 model: stock21.fit3
+* Stock 22 model: stock22.fit3
+* Stock 23 model: stock23.fit3
+* Stock 24 model: stock24.fit1
+* Stock 25 model: stock25.fit1
+* Stock 26 model: stock26.fit1
+* Stock 27 model: stock27.fit3
+* Stock 28 model: stock28.fit3
+* Stock 29 model: stock29.fit3
+* Stock 30 model: stock30.fit3
+* Stock 31 model: stock31.fit3
+* Stock 32 model: stock32.fit3
+* Stock 33 model: stock33.fit3
+* Stock 34 model: stock34.fit3
+* Stock 35 model: stock35.fit3
+* Stock 36 model: stock36.fit3
+* Stock 37 model: stock37.fit3
+* Stock 38 model: stock38.fit3
+* Stock 39 model: stock39.fit3
+* Stock 40 model: stock40.fit2
+
+### stock1 model
+```{r stock1 VaR}
+alpha <- 0.15
+stock1.fit1.pred <- predict(stock1.fit1, n.ahead = 10)
+stock1.fit1.res.quantile <- quantile(stock1.fit1.res, probs = alpha)
+stock1.VaR <- stock1.fit1.pred$standardDeviation * stock1.fit1.res.quantile
+```
+
+### stock2 model
+```{r stock2 VaR}
+stock2.fit1.pred <- predict(stock2.fit1, n.ahead = 10)
+stock2.fit1.res.quantile <- quantile(stock2.fit1.res, probs = alpha)
+stock2.VaR <- stock2.fit1.pred$standardDeviation * stock2.fit1.res.quantile
+```
+
+### stock3 model
+```{r stock3 VaR}
+stock3.fit3.pred <- ugarchforecast(stock3.fit3, n.ahead = 10)
+stock3.fit3.res.quantile <- quantile(stock3.fit3.res, probs = alpha)
+stock3.VaR <- as.numeric(sigma(stock3.fit3.pred)) * stock3.fit3.res.quantile
+```
+
+### stock4 model
+```{r stock4 VaR}
+stock4.fit3.pred <- ugarchforecast(stock4.fit3, n.ahead = 10)
+stock4.fit3.res.quantile <- quantile(stock4.fit3.res, probs = alpha)
+stock4.VaR <- as.numeric(sigma(stock4.fit3.pred)) * stock4.fit3.res.quantile
+```
+
+### stock5 model
+```{r stock5 VaR}
+stock5.fit3.pred <- ugarchforecast(stock5.fit3, n.ahead = 10)
+stock5.fit3.res.quantile <- quantile(stock5.fit3.res, probs = alpha)
+stock5.VaR <- as.numeric(sigma(stock5.fit3.pred)) * stock5.fit3.res.quantile
+```
+
+### stock6 model
+```{r stock6 VaR}
+stock6.fit3.pred <- ugarchforecast(stock6.fit3, n.ahead = 10)
+stock6.fit3.res.quantile <- quantile(stock6.fit3.res, probs = alpha)
+stock6.VaR <- as.numeric(sigma(stock6.fit3.pred)) * stock6.fit3.res.quantile
+```
+
+### stock7 model
+```{r stock7 VaR}
+stock7.fit3.pred <- ugarchforecast(stock7.fit3, n.ahead = 10)
+stock7.fit3.res.quantile <- quantile(stock7.fit3.res, probs = alpha)
+stock7.VaR <- as.numeric(sigma(stock7.fit3.pred)) * stock7.fit3.res.quantile
+```
+
+### stock8 model
+```{r stock8 VaR}
+stock8.fit3.pred <- ugarchforecast(stock8.fit3, n.ahead = 10)
+stock8.fit3.res.quantile <- quantile(stock8.fit3.res, probs = alpha)
+stock8.VaR <- as.numeric(sigma(stock8.fit3.pred)) * stock8.fit3.res.quantile
+```
+
+### stock9 model
+```{r stock9 VaR}
+stock9.fit3.pred <- ugarchforecast(stock9.fit3, n.ahead = 10)
+stock9.fit3.res.quantile <- quantile(stock9.fit3.res, probs = alpha)
+stock9.VaR <- as.numeric(sigma(stock9.fit3.pred)) * stock9.fit3.res.quantile
+```
+
+### stock10 model
+```{r stock10 VaR}
+stock10.fit3.pred <- ugarchforecast(stock10.fit3, n.ahead = 10)
+stock10.fit3.res.quantile <- quantile(stock10.fit3.res, probs = alpha)
+stock10.VaR <- as.numeric(sigma(stock10.fit3.pred)) * stock10.fit3.res.quantile
+```
+
+### stock11 model
+```{r stock11 VaR}
+stock11.fit3.pred <- ugarchforecast(stock11.fit3, n.ahead = 10)
+stock11.fit3.res.quantile <- quantile(stock11.fit3.res, probs = alpha)
+stock11.VaR <- as.numeric(sigma(stock11.fit3.pred)) * stock11.fit3.res.quantile
+```
+
+### stock12 model
+```{r stock12 VaR}
+stock12.fit3.pred <- ugarchforecast(stock12.fit3, n.ahead = 10)
+stock12.fit3.res.quantile <- quantile(stock12.fit3.res, probs = alpha)
+stock12.VaR <- as.numeric(sigma(stock12.fit3.pred)) * stock12.fit3.res.quantile
+```
+
+### stock13 model
+```{r stock13 VaR}
+stock13.fit3.pred <- ugarchforecast(stock13.fit3, n.ahead = 10)
+stock13.fit3.res.quantile <- quantile(stock13.fit3.res, probs = alpha)
+stock13.VaR <- as.numeric(sigma(stock13.fit3.pred)) * stock13.fit3.res.quantile
+```
+
+### stock14 model
+```{r stock14 VaR}
+stock14.fit3.pred <- ugarchforecast(stock14.fit3, n.ahead = 10)
+stock14.fit3.res.quantile <- quantile(stock14.fit3.res, probs = alpha)
+stock14.VaR <- as.numeric(sigma(stock14.fit3.pred)) * stock14.fit3.res.quantile
+```
+
+### stock15 model
+```{r stock15 VaR}
+stock15.fit3.pred <- ugarchforecast(stock15.fit3, n.ahead = 10)
+stock15.fit3.res.quantile <- quantile(stock15.fit3.res, probs = alpha)
+stock15.VaR <- as.numeric(sigma(stock15.fit3.pred)) * stock15.fit3.res.quantile
+```
+
+### stock16 model
+```{r stock16 VaR}
+stock16.fit3.pred <- ugarchforecast(stock16.fit3, n.ahead = 10)
+stock16.fit3.res.quantile <- quantile(stock16.fit3.res, probs = alpha)
+stock16.VaR <- as.numeric(sigma(stock16.fit3.pred)) * stock16.fit3.res.quantile
+```
+
+### stock17 model
+```{r stock17 VaR}
+stock17.fit3.pred <- ugarchforecast(stock17.fit3, n.ahead = 10)
+stock17.fit3.res.quantile <- quantile(stock17.fit3.res, probs = alpha)
+stock17.VaR <- as.numeric(sigma(stock17.fit3.pred)) * stock17.fit3.res.quantile
+```
+
+### stock18 model
+```{r stock18 VaR}
+stock18.fit3.pred <- ugarchforecast(stock18.fit3, n.ahead = 10)
+stock18.fit3.res.quantile <- quantile(stock18.fit3.res, probs = alpha)
+stock18.VaR <- as.numeric(sigma(stock18.fit3.pred)) * stock18.fit3.res.quantile
+```
+
+### stock19 model
+```{r stock19 VaR}
+stock19.fit3.pred <- ugarchforecast(stock19.fit3, n.ahead = 10)
+stock19.fit3.res.quantile <- quantile(stock19.fit3.res, probs = alpha)
+stock19.VaR <- as.numeric(sigma(stock19.fit3.pred)) * stock19.fit3.res.quantile
+```
+
+### stock20 model
+```{r stock20 VaR}
+stock20.fit3.pred <- ugarchforecast(stock20.fit3, n.ahead = 10)
+stock20.fit3.res.quantile <- quantile(stock20.fit3.res, probs = alpha)
+stock20.VaR <- as.numeric(sigma(stock20.fit3.pred)) * stock20.fit3.res.quantile
+```
+
+### stock21 model
+```{r stock21 VaR}
+stock21.fit3.pred <- ugarchforecast(stock21.fit3, n.ahead = 10)
+stock21.fit3.res.quantile <- quantile(stock21.fit3.res, probs = alpha)
+stock21.VaR <- as.numeric(sigma(stock21.fit3.pred)) * stock21.fit3.res.quantile
+```
+
+### stock22 model
+```{r stock22 VaR}
+stock22.fit3.pred <- ugarchforecast(stock22.fit3, n.ahead = 10)
+stock22.fit3.res.quantile <- quantile(stock22.fit3.res, probs = alpha)
+stock22.VaR <- as.numeric(sigma(stock22.fit3.pred)) * stock22.fit3.res.quantile
+```
+
+### stock23 model
+```{r stock23 VaR}
+stock23.fit3.pred <- ugarchforecast(stock23.fit3, n.ahead = 10)
+stock23.fit3.res.quantile <- quantile(stock23.fit3.res, probs = alpha)
+stock23.VaR <- as.numeric(sigma(stock23.fit3.pred)) * stock23.fit3.res.quantile
+```
+
+### stock24 model
+```{r stock24 VaR}
+stock24.fit1.pred <- predict(stock24.fit1, n.ahead = 10)
+stock24.fit1.res.quantile <- quantile(stock24.fit1.res, probs = alpha)
+stock24.VaR <- stock24.fit1.pred$standardDeviation * stock24.fit1.res.quantile
+```
+
+### stock25 model
+```{r stock25 VaR}
+stock25.fit1.pred <- predict(stock25.fit1, n.ahead = 10)
+stock25.fit1.res.quantile <- quantile(stock25.fit1.res, probs = alpha)
+stock25.VaR <- stock25.fit1.pred$standardDeviation * stock25.fit1.res.quantile
+```
+
+### stock26 model
+```{r stock26 VaR}
+stock26.fit1.pred <- predict(stock26.fit1, n.ahead = 10)
+stock26.fit1.res.quantile <- quantile(stock26.fit1.res, probs = alpha)
+stock26.VaR <- stock26.fit1.pred$standardDeviation * stock26.fit1.res.quantile
+```
+
+### stock27 model
+```{r stock27 VaR}
+stock27.fit3.pred <- ugarchforecast(stock27.fit3, n.ahead = 10)
+stock27.fit3.res.quantile <- quantile(stock27.fit3.res, probs = alpha)
+stock27.VaR <- as.numeric(sigma(stock27.fit3.pred)) * stock27.fit3.res.quantile
+```
+
+### stock28 model
+```{r stock28 VaR}
+stock28.fit3.pred <- ugarchforecast(stock28.fit3, n.ahead = 10)
+stock28.fit3.res.quantile <- quantile(stock28.fit3.res, probs = alpha)
+stock28.VaR <- as.numeric(sigma(stock28.fit3.pred)) * stock28.fit3.res.quantile
+```
+
+### stock29 model
+```{r stock29 VaR}
+stock29.fit3.pred <- ugarchforecast(stock29.fit3, n.ahead = 10)
+stock29.fit3.res.quantile <- quantile(stock29.fit3.res, probs = alpha)
+stock29.VaR <- as.numeric(sigma(stock29.fit3.pred)) * stock29.fit3.res.quantile
+```
+
+### stock30 model
+```{r stock30 VaR}
+stock30.fit3.pred <- ugarchforecast(stock30.fit3, n.ahead = 10)
+stock30.fit3.res.quantile <- quantile(stock30.fit3.res, probs = alpha)
+stock30.VaR <- as.numeric(sigma(stock30.fit3.pred)) * stock30.fit3.res.quantile
+```
+
+### stock31 model
+```{r stock31 VaR}
+stock31.fit3.pred <- ugarchforecast(stock31.fit3, n.ahead = 10)
+stock31.fit3.res.quantile <- quantile(stock31.fit3.res, probs = alpha)
+stock31.VaR <- as.numeric(sigma(stock31.fit3.pred)) * stock31.fit3.res.quantile
+```
+
+### stock32 model
+```{r stock32 VaR}
+stock32.fit3.pred <- ugarchforecast(stock32.fit3, n.ahead = 10)
+stock32.fit3.res.quantile <- quantile(stock32.fit3.res, probs = alpha)
+stock32.VaR <- as.numeric(sigma(stock32.fit3.pred)) * stock32.fit3.res.quantile
+```
+
+### stock33 model
+```{r stock33 VaR}
+stock33.fit3.pred <- ugarchforecast(stock33.fit3, n.ahead = 10)
+stock33.fit3.res.quantile <- quantile(stock33.fit3.res, probs = alpha)
+stock33.VaR <- as.numeric(sigma(stock33.fit3.pred)) * stock33.fit3.res.quantile
+```
+
+### stock34 model
+```{r stock34 VaR}
+stock34.fit3.pred <- ugarchforecast(stock34.fit3, n.ahead = 10)
+stock34.fit3.res.quantile <- quantile(stock34.fit3.res, probs = alpha)
+stock34.VaR <- as.numeric(sigma(stock34.fit3.pred)) * stock34.fit3.res.quantile
+```
+
+### stock35 model
+```{r stock35 VaR}
+stock35.fit3.pred <- ugarchforecast(stock35.fit3, n.ahead = 10)
+stock35.fit3.res.quantile <- quantile(stock35.fit3.res, probs = alpha)
+stock35.VaR <- as.numeric(sigma(stock35.fit3.pred)) * stock35.fit3.res.quantile
+```
+
+### stock36 model
+```{r stock36 VaR}
+stock36.fit3.pred <- ugarchforecast(stock36.fit3, n.ahead = 10)
+stock36.fit3.res.quantile <- quantile(stock36.fit3.res, probs = alpha)
+stock36.VaR <- as.numeric(sigma(stock36.fit3.pred)) * stock36.fit3.res.quantile
+```
+
+### stock37 model
+```{r stock37 VaR}
+stock37.fit3.pred <- ugarchforecast(stock37.fit3, n.ahead = 10)
+stock37.fit3.res.quantile <- quantile(stock37.fit3.res, probs = alpha)
+stock37.VaR <- as.numeric(sigma(stock37.fit3.pred)) * stock37.fit3.res.quantile
+```
+
+### stock38 model
+```{r stock38 VaR}
+stock38.fit3.pred <- ugarchforecast(stock38.fit3, n.ahead = 10)
+stock38.fit3.res.quantile <- quantile(stock38.fit3.res, probs = alpha)
+stock38.VaR <- as.numeric(sigma(stock38.fit3.pred)) * stock38.fit3.res.quantile
+```
+
+### stock39 model
+```{r stock39 VaR}
+stock39.fit3.pred <- ugarchforecast(stock39.fit3, n.ahead = 10)
+stock39.fit3.res.quantile <- quantile(stock39.fit3.res, probs = alpha)
+stock39.VaR <- as.numeric(sigma(stock39.fit3.pred)) * stock39.fit3.res.quantile
+```
+
+### stock40 model
+```{r stock40 VaR}
+stock40.fit2.pred <- predict(stock40.fit2, n.ahead = 10)
+stock40.fit2.res.quantile <- quantile(stock40.fit2.res, probs = alpha)
+stock40.VaR <- stock40.fit2.pred$standardDeviation * stock40.fit2.res.quantile
+```
+
+```{r}
+
+```
+

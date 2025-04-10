@@ -1,0 +1,134 @@
+---
+title: "STAT 443 Spring 2024 Final Project Supplementary Material2"
+author: "Scenario 3&4"
+date: "UW ID: 20885166, Daolin(Chase) An"
+output: 
+    pdf_document:
+      toc: true
+      latex_engine: xelatex
+      number_sections: yes
+---
+
+# Preliminary
+```{r Pre, message=FALSE, warning=FALSE}
+rm(list=ls())
+set.seed("20885166")
+library(forecast)
+## Scenario 3&4 data
+data.car <- read.csv("car.txt")
+data.gas <- read.csv("gas.txt")
+data.beer <- read.csv("beer.txt")
+data.steel <- read.csv("steel.txt")
+data.electricity <- read.csv("electricity.txt")
+data.temperature <- read.csv("temperature.txt")
+```
+
+# Scenario3
+
+## Original data Analysis
+```{r}
+data.beer.beforeNA <- data.beer$Value[1:200]
+data.beer.afterNA <- data.beer$Value[231:435]
+exog <- data.temperature$Value[147:581]## To match the length
+```
+
+### acf and pacf before NA
+```{r fig.height=4}
+ts.plot(data.beer.beforeNA)
+acf(data.beer.beforeNA)
+pacf(data.beer.beforeNA)
+```
+
+### acf and pacf after NA
+```{r fig.height=4}
+ts.plot(data.beer.afterNA)
+acf(data.beer.afterNA)
+pacf(data.beer.afterNA)
+```
+
+## Difference data
+```{r}
+data.beer.diff <- diff(data.beer$Value, lag = 12)
+data.beer.diff.beforeNA <- data.beer.diff[1:188]
+data.beer.diff.afterNA <- data.beer.diff[231:423]
+```
+
+### acf and pacf of differenced data before NA
+```{r fig.height=4}
+acf(data.beer.diff.beforeNA, 40)
+pacf(data.beer.diff.beforeNA, 40)
+```
+
+### acf and pacf of differenced data after NA
+```{r fig.height=4}
+acf(data.beer.diff.afterNA, 40)
+pacf(data.beer.diff.afterNA, 40)
+```
+
+## Try some orders
+```{r Try some orders, cache=TRUE}
+beer.fit1 <- astsa::sarima(log(data.beer$Value), 10, 1, 0, 4, 1, 3, 12, xreg = exog)
+```
+
+
+```{r sarima model, cache=TRUE}
+beer.fit <- arima(log(data.beer$Value), order = c(10, 1, 0), 
+                  seasonal = list(order=c(4, 1, 3), period = 12), xreg = exog)
+```
+
+## Kalman Smoothing
+```{r}
+data.beer.imputed <- data.beer
+smoothResult <- KalmanSmooth(y = data.beer$Value, mod = beer.fit$model)
+```
+
+### Imputed Values on original times series
+```{r}
+smoothVal <- smoothResult$smooth
+smoothState <- smoothVal[, 59]
+imputedVal <- smoothState[202:231]
+data.beer.imputed$Value[201:230] <- imputedVal
+ts.plot(data.beer.imputed$Value)
+```
+
+### Confidence intervals for imputed values
+```{r}
+## Assume normal
+smoothVar <- smoothResult$var[, 59, 59]
+smoothSE <- sqrt(smoothVar[202:231])
+Ci.upper <- imputedVal + 1.96 * smoothSE
+CI.lower <- imputedVal - 1.96 * smoothSE
+```
+
+# Scenario 4
+
+## Check if there is need to try different orders
+```{r}
+# beer.imputed.fit <- astsa::sarima(log(data.beer.imputed$Value), 10, 1, 0, 4, 1, 3, 12, xreg = exog)
+```
+
+It seems that picking different orders will not improve the model, so I will 
+use the original ARIMAX model to make predictions.
+
+## Descriptive Statistics
+```{r beer Descriptive}
+beer.mean <- mean(data.beer$Value, na.rm = TRUE); beer.mean
+beer.var <- var(data.beer$Value, na.rm = TRUE); beer.var
+beer.max_min <- range(data.beer$Value, na.rm = TRUE); beer.max_min
+```
+
+
+## Forecast 24 steps ahead
+```{r}
+beer.pred <- predict(beer.fit, n.ahead = 24, newxreg = mean(data.temperature$Value))
+```
+
+### Prediction interval
+```{r}
+beer.pred.val <- beer.pred$pred
+beer.pred.se <- beer.pred$se
+PI.lower <- exp(beer.pred.val - 1.96 * beer.pred.se)
+PI.lower <- exp(beer.pred.val + 1.96 * beer.pred.se)
+```
+
+

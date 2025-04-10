@@ -1,0 +1,219 @@
+---
+title: "STAT 443 Spring 2024 Final Project Supplementary Material3"
+author: "Scenario 5"
+date: "UW ID: 20885166, Daolin(Chase) An"
+output: 
+    pdf_document:
+      toc: true
+      latex_engine: xelatex
+      number_sections: yes
+---
+
+```{r message=FALSE, warning=FALSE}
+rm(list=ls())
+set.seed("20885166")
+library(astsa)
+library(fGarch)
+library(rugarch)
+library(forecast)
+## Scenario 5 data
+data.pollution1 <- read.csv("pollutionCity1.txt")
+data.pollution2 <- read.csv("pollutionCity2.txt")
+data.pollution3 <- read.csv("pollutionCity3.txt")
+```
+
+# City 1
+```{r city1, fig.height=4}
+data.pollution1.value <- data.pollution1$Value
+ts.plot(data.pollution1.value, main = "Pollution city 1")
+ts.plot(data.pollution1.value^2, main = "squared Pollution city 1")
+acf(data.pollution1.value)
+pacf(data.pollution1.value)
+```
+
+## City 1 model fitting
+```{r}
+data.pollution1.value[data.pollution1.value == 0] <- 1e-6
+city1.fit <- arima(log(data.pollution1.value), order = c(4, 0, 3))
+city1.fit.res <- as.numeric(residuals(city1.fit))
+summary(city1.fit)
+astsa::sarima(log(data.pollution1.value), p = 4, d= 0, q = 3)
+```
+
+### Analyze residuals
+```{r fig.height=3.5}
+ts.plot(city1.fit.res)
+par(mfrow=c(1, 2))
+acf(city1.fit.res, main = "residuals")
+qqnorm(city1.fit.res, main = 'Normal Q-Q Plot of Std Residuals', 
+       cex.main = 0.8, cex.lab = 0.8, cex.axis = 0.8)
+qqline(city1.fit.res, col = 'red')
+par(mfrow=c(1, 1))
+city1.pvals <- numeric()
+for (i in 1:20) {
+  result <- Box.test(city1.fit.res, lag = i, type = "Ljung-Box")
+  city1.pvals[i] <- result$p.value
+}
+plot(1:20, city1.pvals, pch = 19, 
+     xlab = "Lag(H)", ylab = "p-value", 
+     main = "P-values for Ljung-Box statistic")
+```
+
+# City 2
+```{r city2, fig.height=4}
+data.pollution2.value <- data.pollution2$Value
+ts.plot(data.pollution2.value, main = "Pollution city 2")
+ts.plot(data.pollution2.value^2, main = "squared Pollution city 2")
+acf(data.pollution2.value)
+pacf(data.pollution2.value)
+```
+
+## City 2 model fitting
+```{r}
+city2.fit <- arima(data.pollution2.value, order = c(10, 1, 5))
+city2.fit.res <- as.numeric(residuals(city2.fit))
+summary(city2.fit)
+astsa::sarima(data.pollution2.value, p = 10, d= 1, q = 5)
+```
+
+### Analyze residuals
+```{r}
+ts.plot(city2.fit.res)
+acf(city2.fit.res, main = 'residuals')
+qqnorm(city2.fit.res, main = 'Normal Q-Q Plot of Std Residuals', 
+       cex.main = 0.8, cex.lab = 0.8, cex.axis = 0.8)
+qqline(city2.fit.res, col = 'red')
+city2.pvals <- numeric()
+for (i in 1:20) {
+  result <- Box.test(city2.fit.res, lag = i, type = 'Ljung-Box')
+  city2.pvals[i] <- result$p.value
+}
+plot(1:20, city2.pvals, pch = 19, 
+     xlab = 'Lag(H)', ylab = 'p-value', 
+     main = 'P-values for Ljung-Box statistic')
+```
+
+### Try ARMA-GARCH
+```{r}
+city2.spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(2, 1)),
+  mean.model = list(armaOrder = c(6, 1, 4), include.mean = TRUE),
+  distribution.model = "std"
+)
+city2.fit.ArmaGarch <- ugarchfit(spec = city2.spec, data = data.pollution2.value)
+```
+
+### Analyze the residuals
+```{r}
+city2.fit.ArmaGarch.res <- as.numeric(residuals(city2.fit.ArmaGarch))
+ts.plot(city2.fit.ArmaGarch.res)
+acf(city2.fit.ArmaGarch.res, main = 'residuals')
+qqnorm(city2.fit.ArmaGarch.res, main = 'Normal Q-Q Plot of Std Residuals',
+       cex.main = 0.8, cex.lab = 0.8, cex.axis = 0.8)
+qqline(city2.fit.ArmaGarch.res, col = 'red')
+city2.ArmaGarch.pvals <- numeric()
+for (i in 1:20) {
+  result <- Box.test(city2.fit.ArmaGarch.res, lag = i, type = 'Ljung-Box')
+  city2.ArmaGarch.pvals[i] <- result$p.value
+}
+plot(1:20, city2.ArmaGarch.pvals, pch = 19,
+     xlab = 'Lag(H)', ylab = 'p-value',
+     main = 'P-values for Ljung-Box statistic')
+```
+
+### Try pure GARCH
+```{r}
+city2.GARCHspec <- rugarch::ugarchspec(variance.model = list(model = 'sGARCH', 
+                                                        garchOrder = c(1, 0)),
+                                       mean.model = list(armaOrder = c(0, 0)))
+city2.fit.GARCH <- rugarch::ugarchfit(city2.GARCHspec, data = data.pollution2.value, solver='hybrid')
+city2.fit.GARCH.res <- as.numeric(residuals(city2.fit.GARCH, standardize = TRUE))
+```
+
+```{r}
+ts.plot(city2.fit.GARCH.res)
+acf(city2.fit.GARCH.res, main = 'residuals')
+qqnorm(city2.fit.GARCH.res, main = "Normal Q-Q Plot of Std Residuals")
+qqline(city2.fit.GARCH.res, col = "red")
+city2.fit.GARCH.vol <- as.numeric(rugarch::sigma(city2.fit.GARCH))
+city2.fit.GARCH.sigma.sqr <- city2.fit.GARCH.vol^2
+ts.plot(data.pollution2.value)
+lines(city2.fit.GARCH.vol, col = 'red')
+```
+
+# City 3
+```{r city3, fig.height=4}
+data.pollution3.value <- data.pollution3$Value
+ts.plot(data.pollution3.value, main = "Pollution city 3")
+ts.plot(data.pollution3.value^2, main = "squared Pollution city 3")
+acf(data.pollution3.value)
+pacf(data.pollution3.value)
+```
+
+## City 3 model fitting
+```{r}
+city3.fit <- arima(data.pollution3.value, order = c(8, 1, 3))
+city3.fit.res <- as.numeric(residuals(city3.fit))
+summary(city3.fit)
+```
+
+### Analyze residuals
+```{r echo=FALSE, fig.height=3}
+ts.plot(city3.fit.res)
+par(mfrow=c(1, 2))
+acf(city3.fit.res, main = '')
+qqnorm(city3.fit.res, main = '', 
+       cex.main = 0.8, cex.lab = 0.8, cex.axis = 0.8)
+qqline(city3.fit.res, col = 'red')
+city3.pvals <- numeric()
+for (i in 1:20) {
+  result <- Box.test(city3.fit.res, lag = i, type = 'Ljung-Box')
+  city3.pvals[i] <- result$p.value
+}
+par(mfrow=c(1, 1))
+plot(1:20, city3.pvals, pch = 19, 
+     xlab = 'Lag(H)', ylab = 'p-value', 
+     main = 'P-values for Ljung-Box statistic', cex.main = 0.7)
+```
+
+## Try GARCH on the residuals
+```{r}
+city3.res.fit <- garchFit(formula = ~ garch(1, 0), data = city3.fit.res, trace = FALSE)
+city3.res.fit.res <- residuals(city3.res.fit)
+```
+
+### Analyze the residuals
+```{r echo=FALSE}
+acf(city3.res.fit.res, main = 'residuals')
+
+qqnorm(city3.res.fit.res, main = "Normal Q-Q Plot of Std Residuals")
+qqline(city3.res.fit.res, col = "red")
+city3.res.fit.sigma.sqr <- city3.res.fit@sigma.t^2
+city3.res.fit.vol <- sqrt(city3.res.fit.sigma.sqr)
+ts.plot(city3.fit.res)
+lines(city3.res.fit.vol, col = 'red')
+city3.res.pvals <- numeric()
+for (i in 1:20) {
+  result <- Box.test(city3.res.fit.res, lag = i, type = 'Ljung-Box')
+  city3.res.pvals[i] <- result$p.value
+}
+plot(1:20, city3.res.pvals, pch = 19, 
+     xlab = 'Lag(H)', ylab = 'p-value', 
+     main = 'P-values for Ljung-Box statistic')
+```
+
+# Predictions
+## City1
+```{r}
+city1.pred.result <- predict(city1.fit, n.ahead = 336)
+city1.pred <- as.numeric(exp(city1.pred.result$pred))
+city1.PI.lower <- city1.pred - 1.96 * as.numeric(city1.pred.result$se)
+city1.PI.upper <- city1.pred + 1.96 * as.numeric(city1.pred.result$se)
+city1.forecast.df <- data.frame(
+  ID = 2545:2880, 
+  Value = city1.pred.result,
+  Upper = city1.PI.upper,
+  Lower = city1.PI.lower
+)
+```
+

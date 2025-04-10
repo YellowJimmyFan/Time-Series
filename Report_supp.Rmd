@@ -1,0 +1,580 @@
+---
+title: "STAT 443 Spring 2024 Final Project Report"
+author: "Daolin(Chase) An"
+date: "UW ID: 20885166"
+output: 
+    pdf_document:
+      toc: true
+      latex_engine: xelatex
+      number_sections: yes
+---
+
+\newpage
+
+```{r preliminary, message=FALSE, warning=FALSE, echo=FALSE}
+library(astsa)
+library(fGarch)
+library(rugarch)
+library(ggplot2)
+set.seed("20885166")
+## Scenario 1 data
+data.hydro <- read.csv("hydrology_data.txt")
+## Scenario 2 data
+for (i in 1:40) {
+  stockID <- paste0("stock", i, ".txt")
+  stockVAL <- read.csv(stockID)
+  assign(paste0("data.stock", i), stockVAL)
+}
+## Scenario 3&4 data
+data.car <- read.csv("car.txt")
+data.gas <- read.csv("gas.txt")
+data.beer <- read.csv("beer.txt")
+data.steel <- read.csv("steel.txt")
+data.electricity <- read.csv("electricity.txt")
+data.temperature <- read.csv("temperature.txt")
+## Scenario 5 data
+data.pollution1 <- read.csv("pollutionCity1.txt")
+data.pollution2 <- read.csv("pollutionCity2.txt")
+data.pollution3 <- read.csv("pollutionCity3.txt")
+```
+
+# Scenario 1: Hydrological Forecast
+
+## Analysis
+
+I first plot the original series, and observe that:
+
+* There is high variability in the first half of the series but 
+then the variability becomes more moderate. 
+This may indicate that the original time series is non-stationary. 
+
+* The data also suggests a possible seasonal pattern, as it shows regular and 
+frequent peaks and troughs.
+
+*  The data covers 576 consecutive months, representing a 48-year period. 
+Within each year, the value of data typically increase from January(assume 
+the first value was recorded in January) to May, peaking at May, and then 
+it decreases from May to December.
+
+Then I apply seasonal differencing on the data to make it more stationary and 
+take a log transformation to address the unstable variability. 
+I think a 12th-order difference is appropriate in this case(yearly).
+
+Next, I visually check acf/pacf of the differenced data and perform KPSS test 
+on it. Visual inspection and KPSS result indicate that the differenced data is 
+stationary, so I begin to fit a model.
+
+```{r hydro analysis plots, fig.height=3, echo=FALSE}
+data.hydro.diffed <- diff(log(data.hydro$Value), lag = 12)
+acf(data.hydro.diffed, main = "", xlab = "")
+pacf(data.hydro.diffed, main = "", xlab = "")
+```
+
+**Seasonal Component: **It appears that at the seasons, the PACF is cutting 
+off at lag 1s(s = 12). The ACF is tailing off at at lag 1s, 2s. 
+These results implies an SAR(1), SMA(1), P = 1, Q = 1, in the season(s = 12).
+
+**Non-Seasonal Component: **Inspecting the sample ACF and PACF at the lower 
+lags, it appears as though both are tailing off. This suggests an ARMA(1, 1) 
+within the seasons, p = q = 1. Now since both the acf and pacf of differenced 
+data tails off, and the time series shows a general seasonal pattern, I start 
+with a SARIMA$(1,1,1) \times (1,1,1)_{12}$ model.
+
+I generated several models, and these models are compared via AIC/BIC,
+expanding window cross-validation error(see Appendix), and residual analysis.
+
+I end up with a SARIMA$(3,1,1) \times (1,1,1)_{12}$ model with AIC=-4.223715, 
+BIC=-4.169838, Expanding Window Cross-Validation MSE = 3.767112. I do not pick 
+the other models because they either show higher AIC/BIC/CV_MSE or show more 
+severe violations to model assumptions like white noise, normality. (Details 
+can be found in my Supplementary file)
+
+The figure below gives the diagnostic plots for my final model. The model seems 
+to capture all the autocorrelation with only one lag outside the bands, so it 
+is not a big concern. The residuals are randomly scattered around y=0, and 
+there is one part of noticeable spike in the middle part which can be seen as 
+outlier and it would not affect the model's overall performance. Moreover, the 
+Box-Ljeung-Pierce test supports the assumption of white noise. 
+
+One potential problem is that although the model is approximately normal, it 
+has a slightly heavier tail which may negatively affect the performance of 
+our prediction interval. It may be more likely to observe extreme values in 
+this case, so the prediction interval may be adjusted wider to cover them.
+
+![Diagnostics plots for SARIMA(3, 1, 1) × (1, 1, 1)12 model on logged data](hydrofinalModel.png)
+
+## Forecasts and 95% prediction intervals
+
+```{r hydro prediction interval, echo=FALSE}
+hydro.fit.result <- sarima.for(as.ts(log(data.hydro$Value)), 24, 
+                               3, 1, 1, 1, 1, 1, 12, plot = FALSE)
+hydro.logforecast <- as.numeric(hydro.fit.result$pred)
+hydro.forecast <- exp(hydro.logforecast)
+hydro.forecast.se <- hydro.fit.result$se
+PI.lower <- exp(hydro.logforecast - 1.96 * hydro.forecast.se)
+PI.upper <- exp(hydro.logforecast + 1.96 * hydro.forecast.se)
+
+hydro.df <- data.frame(ID = 1:576, Value = data.hydro$Value)
+hydro.forecast.df <- data.frame(
+  ID = 577:600, Value = hydro.forecast,
+  Lower = PI.lower,
+  Upper = PI.upper
+)
+ggplot() +
+  geom_line(data = hydro.df, aes(x = ID, y = Value), color = "black") +
+  geom_line(data = hydro.forecast.df, aes(x = ID, y = Value), 
+            color = "red") +
+  geom_ribbon(data = hydro.forecast.df, 
+              aes(x = ID, ymin = Lower, ymax = Upper), 
+              fill = "red", alpha = 0.2) +
+  labs(x = "", y = "") +
+  ggtitle("1-month to 24-month ahead forecasts and 95% prediction intervals") + 
+  theme_minimal()
+```
+
+\newpage
+
+# Scenario 2: Financial Risk Forecast
+## Analysis
+
+Since the series are all "financial", I focus on GARCH-type models in this 
+scenario. I manually fit several models to each stock, compare them, and pick 
+the most reasonable model among them. The same process is followed to 
+analyze all the stock data, so I will just present one typical case. 
+
+We are given the log differenced data, so stationarity is not a concern to me
+(KPSS test and visual inspection are used to confirm stationarity). 
+Instead, I mainly check:
+
+* the squared time series to see if there are significant volatility clustering
+
+* the acf of squared time series to confirm volatility clustering and 
+identify lags that show significant autocorrelations
+
+After detecting volatility clustering, I fit models and usually start with a 
+GARCH(1, 1) model. I then check its validity by overlay its estimated 
+conditional variance on the original series to see if the model can capture 
+the structure/volatility in the series. The model's residuals are also checked 
+to ensure it satisfies assumptions(a sequence of with mean 1, no pattern) of 
+GARCH-type model. 
+
+For most of the given data, GARCH(1, 1) would be way too under-specified. To 
+address this, I typically:
+
+* pick higher orders based on AIC/BIC/Expanding Window Cross-Validation MSE or
+
+* use a more complex model such as "eGARCH"
+
+For example, a GARCH(1, 1) model of stock4
+
+```{r stock4 fit1, fig.height=3.5, message=FALSE, warning=FALSE, echo=FALSE}
+stock4.fit1 <- garchFit(formula = ~ garch(1, 1), data = data.stock4, trace = FALSE)
+stock4.fit1.sigma.sqr <- stock4.fit1@sigma.t^2
+stock4.fit1.vol <- sqrt(stock4.fit1.sigma.sqr)
+ts.plot(data.stock4, xlab="")
+lines(stock4.fit1.vol, col = 'red')
+```
+It is clear the model does not capture the pattern in the data which may 
+indicate the number of parameters included is not enough or model is too simple.
+
+After adding number of parameters and using more complex models, compared by
+information criterion AIC/BIC and cross-validation MSE, I end up with 
+a eGARCH(4, 2) model with AIC=-4.389625, BIC=-4.148775, CV MSE= 0.0009684144. 
+The mean of the residuals is $0.9613752 \approx 1$. (Model comparison and 
+details can be found in my supplementary file)
+
+The plots below gives the diagnostic plots of my final model for stock4. 
+The model seems to capture all the autocorrelation with only one lag outside 
+the bands, which is a good sign. The standardized residuals approximately 
+follow a normal distribution. The conditional volatility laid on the original 
+times series seem to do a good job at capturing the variablity in the data.
+
+```{r stock4 diagnostics, fig.height=3.5, message=FALSE, warning=FALSE, echo=FALSE}
+stock4.spec <- rugarch::ugarchspec(variance.model = list(model = 'eGARCH', 
+                                                         garchOrder = c(4, 2)),
+                                   mean.model = list(armaOrder = c(0, 0)))
+stock4.fit <- rugarch::ugarchfit(stock4.spec, data = data.stock4)
+stock4.fit.res <- as.numeric(residuals(stock4.fit, standardize = TRUE))
+par(mfrow = c(1, 2))
+acf(stock4.fit.res, main = "ACF of residuals eGARCH(4,2)", 
+    cex.main = 0.6, cex.lab = 0.7, cex.axis = 0.7)
+qqnorm(stock4.fit.res, main = 'Normal Q-Q Plot of Std Residuals', 
+       cex.main = 0.7, cex.lab = 0.7, cex.axis = 0.7)
+qqline(stock4.fit.res, col = 'red')
+stock4.fit.vol <- as.numeric(rugarch::sigma(stock4.fit))
+stock4.fit.sigma.sqr <- stock4.fit.vol^2
+par(mfrow = c(1, 1))
+ts.plot(data.stock4, main="Conditional volatility on original series")
+lines(stock4.fit.vol, col = 'red')
+```
+
+## 15% quantiles 10 steps ahead forecasts for stock4, and plot
+```{r 0.15 quantiles 10 steps ahead forecasts for stock4, message=FALSE, warning=FALSE, echo=FALSE}
+alpha <- 0.15
+stock4.fit.pred <- ugarchforecast(stock4.fit, n.ahead = 10)
+stock4.fit.res.quantile <- quantile(stock4.fit.res, probs = alpha)
+stock4.VaR <- as.numeric(sigma(stock4.fit.pred)) * stock4.fit.res.quantile
+stock4.VaR
+
+stock4.df <- data.frame(ID = 1:150, Value = data.stock4$Value)
+stock4.forecast.df <- data.frame(ID = 151:160, Value = stock4.VaR)
+ggplot() +
+  geom_line(data = stock4.df, aes(x = ID, y = Value), color = "black") +
+  geom_line(data = stock4.forecast.df, aes(x = ID, y = Value), 
+            color = "red") +
+  labs(x = "", y = "") +
+  ggtitle("15% quantiles 10 steps ahead forecasts") + 
+  theme_minimal()
+```
+
+\newpage
+
+# Scenarios 3 and 4: Imputation and Multivariate Time Series Forecasting
+## Analysis
+
+The beer data covers 435 consecutive months, representing a roughly 36 year 
+period, however the values between row 200 and row 230 are missing. There 
+seems to be no observable seasonal pattern by purely visual inspection. 
+
+Of all the extra data provided, I hypothesize temperature likely has a 
+significant impact on the beer consumption based on common sense. This 
+hypothesis is confirmed later by my model summary. The temperature data covers 
+a broader range of dates than the beer data, which makes it 
+easier to align their dates and values for use of multivariate time 
+series models. I do not observe any direct relationship between beer 
+consumption and other extra data like car data, electricity data. Therefore, 
+I would not include these as exogenous variables to fit my model.
+
+I initially split the beer data into two parts and analyze each part separately.
+
+First part(corresponds to values from row1 to row200)
+
+* There is a clear increasing trend and variability shown by its time 
+series plot.
+
+* There also appears to be some seasonality with repeating patterns at regular 
+intervals(12 month by visual inspection). 
+
+* The ACF show a slow decay, and significant autocorrelations 
+occur at many lags.
+
+Second part(corresponds to values from row231 to the last row)
+
+* There is no observable trend and seasonality for the second part.
+
+* The variability seems stable with minor fluctuations.
+
+* The ACF shows a quick decay at lower lags, but it exhibits a recurring pattern.
+
+Based on the findings I:
+
+* take a log transformation overall to reduce the variability in the first part
+
+* apply seasonal differencing with a lag of 12 to address non-stationarity
+
+After these are done, I proceed to fit models. It is hard to pick seasonal or 
+non-seasonal components orders by inspection since the data is split and 
+contains missing values. Therefore, I conduct a grid-search over possible 
+parameters and select a combination of orders that yields a reasonably 
+low AIC/BIC. The optimal model I find is 
+SARIMA$(10, 1, 0) \times (4, 1, 3)_{12}$ 
+with temperature as an exogenous variable.
+
+Then I pass this model to KalmanSmooth() to impute the missing values.
+
+After imputing the missing values, I try different order combinations to see 
+if there are better models. It turns out none improve my model, so I just 
+stick with it for forecasting. Since there is no further temperature data 
+available, I use its mean as the value for argument newexg.
+
+The figure below gives the diagnostic plots for my final model. The model 
+captures all the known autocorrelation with only two lags outside the bands, 
+so it is generally good. The residuals are randomly scattered
+around y=0 and the model looks approximately normal. Moreover, the 
+Box-Ljeung-Pierce test supports the assumption of white noise although 
+two points are below the confidence band(expected to see 5% of time).
+![Diagnostics plots for SARIMA(10, 1, 0) × (4, 1, 3)12 model on logged data.](beerfinalModel.png)
+
+
+```{r beerfit, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+exog <- data.temperature$Value[147:581]
+beer.fit <- arima(log(data.beer$Value), order = c(10, 1, 0),
+                  seasonal = list(order=c(4, 1, 3), period = 12), xreg = exog)
+```
+
+## Imputations and 95% prediction intervals
+Note the prediction intervals are too narrow so it may be hard to see.
+I will present the 95% lower/upper prediction bounds then.
+```{r before imputation, echo=FALSE, message=FALSE, warning=FALSE}
+smoothResult <- KalmanSmooth(y = data.beer$Value, mod = beer.fit$model)
+smoothVal <- smoothResult$smooth
+smoothState <- smoothVal[, 59]
+beer.imputedVal <- smoothState[202:231]
+smoothVar <- smoothResult$var[, 59, 59]
+smoothSE <- sqrt(smoothVar[202:231])
+PI.upper <- beer.imputedVal + 1.96 * smoothSE
+PI.lower <- beer.imputedVal - 1.96 * smoothSE
+
+beer.beforeNA.df <- data.frame(ID = 1:200, Value = data.beer$Value[1:200])
+beer.afterNA.df <- data.frame(ID = 231:435, Value = data.beer$Value[231:435])
+beer.impute.df <- data.frame(
+  ID = 201:230, 
+  Value = beer.imputedVal,
+  Upper = PI.upper,
+  Lower = PI.lower
+)
+PI.lower; PI.upper
+```
+
+```{r beer imputations and 0.95 prediction intervals, echo=FALSE}
+ggplot() +
+  geom_line(data = beer.beforeNA.df, aes(x = ID, y = Value), color = "black") +
+  geom_line(data = beer.impute.df, aes(x = ID, y = Value), 
+            color = "blue") +
+  geom_ribbon(data = beer.impute.df, 
+              aes(x = ID, ymin = Lower, ymax = Upper), 
+              fill = "blue", alpha = 0.2) +
+  geom_line(data = beer.afterNA.df, aes(x = ID, y = Value), color = "black") +
+  labs(x = "", y = "") +
+  ggtitle("imputed values and 95% prediction intervals") + 
+  theme_minimal()
+```
+
+
+## Forecasts and 95% prediction intervals
+```{r beer forecasts and 0.95 prediction intervals, echo=FALSE}
+beer.pred <- predict(beer.fit, n.ahead = 24, newxreg = mean(data.temperature$Value))
+beer.pred.val.log <- as.numeric(beer.pred$pred)
+beer.pred.val <- exp(beer.pred.val.log)
+beer.pred.se <- as.numeric(beer.pred$se)
+PI.lower.pred <- exp(beer.pred.val.log - 1.96 * beer.pred.se)
+PI.upper.pred <- exp(beer.pred.val.log + 1.96 * beer.pred.se)
+
+beer.forecast.df <- data.frame(
+  ID = 436:459, 
+  Value = beer.pred.val,
+  Upper = PI.upper.pred,
+  Lower = PI.lower.pred
+)
+
+ggplot() +
+  geom_line(data = beer.beforeNA.df, aes(x = ID, y = Value), color = "black") +
+  geom_line(data = beer.impute.df, aes(x = ID, y = Value), color = "black") +
+  geom_line(data = beer.afterNA.df, aes(x = ID, y = Value), color = "black") +
+  geom_line(data = beer.forecast.df, aes(x = ID, y = Value), color = "red") +
+  geom_ribbon(data = beer.forecast.df, 
+              aes(x = ID, ymin = Lower, ymax = Upper), 
+              fill = "red", alpha = 0.2) +
+  labs(x = "", y = "") +
+  ggtitle("24 steps ahead forecasts and 95% prediction intervals") + 
+  theme_minimal()
+
+```
+
+\newpage
+
+# Scenarios 5: Long Horizon Pollution Forecasting
+## Analysis
+
+Initially, I plot the acf/pacf for each pollution series. I found that all the 
+series follow some kind of ARMA process:
+
+```{r echo=FALSE, fig.height=3.5}
+par(mfrow=c(1, 2))
+acf(data.pollution1, main = "", xlab="")
+pacf(data.pollution1, main = "", xlab="")
+acf(data.pollution2, main = "", xlab="")
+pacf(data.pollution2, main = "", xlab="")
+acf(data.pollution3, main = "", xlab="")
+pacf(data.pollution3, main = "", xlab="")
+```
+
+Therefore, I begin with some VARMA models. I have tried a few combination of 
+orders, but they are not satisfying shown by model diagnostics.
+
+Then I decide to fit models for each series instead of using multivariate 
+methods. For each series:
+
+* Auto.arima() is used to pick starting orders.
+
+* Ordering picking are based on AIC/BIC and analysis on the residuals.
+
+A log transformation is taken to stabilized the high variability for 
+pollutionCity1 series.
+
+PollutionCity2 and PollutionCity3 series both show minor volatility clustering 
+by visual inspection, so I consider ARMA-GARCH models for them. However, the 
+ARMA-GARCH models are not satisfying, and do not improve the pure ARMA model.
+(Details can be found in supplementary files). 
+
+I end up with one pure ARMA model for each pollution series.
+
+* For pollution series1, the model is ARMA(4, 0, 3). The residuals from the 
+model resemble white noise, tested using Ljung−Box statistic. The model is 
+also approximately normal, confirmed by Normal Q-Q test. There is also no 
+autocorrelation(pattern) remaining in the residuals.
+
+* For pollution series2 and pollution series3, the final models are 
+ARMA(10, 1, 5) and ARMA(8, 1, 3) respectively. Residuals from both models 
+show no autocorrelations, and resemble white noise. Both of them have 
+heavier tails, so the corresponding prediction intervals probably become wider 
+to cover extreme values(heavier tails).
+
+![Simple diagnostics city1 model](city1finalModel.png)
+![Simple diagnostics city2 model](city2finalModel.png)
+![Simple diagnostics1 city3 model](exceptLB.png)
+![Simple diagnostics1 city3 model](LB.png)
+
+## Forecasts and 95% prediction intervals for each city
+
+### Forecasts and 95% prediction intervals for city1
+```{r Forecasts and 0.95 prediction intervals for city1, echo=FALSE}
+data.pollution1.value <- data.pollution1$Value
+data.pollution1.value[data.pollution1.value == 0] <- 1e-6
+city1.fit <- arima(log(data.pollution1.value), order = c(4, 0, 3))
+city1.pred.result <- predict(city1.fit, n.ahead = 336)
+city1.pred <- exp(city1.pred.result$pred)
+city1.PI.lower <- exp(city1.pred.result$pred - 1.96 * as.numeric(city1.pred.result$se))
+city1.PI.upper <- exp(city1.pred.result$pred + 1.96 * as.numeric(city1.pred.result$se))
+city1.forecast.df <- data.frame(
+  ID = 2545:2880, 
+  Value = city1.pred,
+  Upper = city1.PI.upper,
+  Lower = city1.PI.lower
+)
+pollution1.df <- data.frame(ID = 1:2544, Value = data.pollution1$Value)
+ggplot() +
+  geom_line(data = pollution1.df, aes(x = ID, y = Value), color = "black") +
+  geom_line(data = city1.forecast.df, aes(x = ID, y = Value), color = "red") +
+  geom_ribbon(data = city1.forecast.df, 
+              aes(x = ID, ymin = Lower, ymax = Upper), 
+              fill = "red", alpha = 0.2) +
+  labs(x = "", y = "") +
+  ggtitle("336 steps ahead forecasts and 95% prediction intervals") + 
+  theme_minimal()
+```
+
+### Forecasts and 95% prediction intervals for city2
+```{r Forecasts and 0.95 prediction intervals for city2, echo=FALSE}
+data.pollution2.value <- data.pollution2$Value
+city2.fit <- arima(data.pollution2.value, order = c(10, 1, 5))
+city2.pred.result <- predict(city2.fit, n.ahead = 336)
+city2.pred <- as.numeric(city2.pred.result$pred)
+city2.PI.lower <- city2.pred.result$pred - 1.96 * as.numeric(city2.pred.result$se)
+city2.PI.upper <- city2.pred.result$pred + 1.96 * as.numeric(city2.pred.result$se)
+city2.forecast.df <- data.frame(
+  ID = 2545:2880, 
+  Value = city2.pred,
+  Upper = city2.PI.upper,
+  Lower = city2.PI.lower
+)
+pollution2.df <- data.frame(ID = 1:2544, Value = data.pollution2$Value)
+ggplot() +
+  geom_line(data = pollution2.df, aes(x = ID, y = Value), color = "black") +
+  geom_line(data = city2.forecast.df, aes(x = ID, y = Value), color = "red") +
+  geom_ribbon(data = city2.forecast.df, 
+              aes(x = ID, ymin = Lower, ymax = Upper), 
+              fill = "red", alpha = 0.2) +
+  labs(x = "", y = "") +
+  ggtitle("336 steps ahead forecasts and 95% prediction intervals") + 
+  theme_minimal()
+```
+
+### Forecasts and 95% prediction intervals for city3
+```{r Forecasts and 0.95 prediction intervals for city3, echo=FALSE}
+data.pollution3.value <- data.pollution3$Value
+
+city3.fit <- arima(data.pollution3.value, order = c(8, 1, 3))
+city3.pred.result <- predict(city3.fit, n.ahead = 336)
+city3.pred <- as.numeric(city3.pred.result$pred)
+city3.PI.lower <- city3.pred.result$pred - 1.96 * as.numeric(city3.pred.result$se)
+city3.PI.upper <- city3.pred.result$pred + 1.96 * as.numeric(city3.pred.result$se)
+city3.forecast.df <- data.frame(
+  ID = 2545:2880, 
+  Value = city3.pred,
+  Upper = city3.PI.upper,
+  Lower = city3.PI.lower
+)
+pollution3.df <- data.frame(ID = 1:2544, Value = data.pollution3$Value)
+ggplot() +
+  geom_line(data = pollution3.df, aes(x = ID, y = Value), color = "black") +
+  geom_line(data = city3.forecast.df, aes(x = ID, y = Value), color = "red") +
+  geom_ribbon(data = city3.forecast.df, 
+              aes(x = ID, ymin = Lower, ymax = Upper), 
+              fill = "red", alpha = 0.2) +
+  labs(x = "", y = "") +
+  ggtitle("336 steps ahead forecasts and 95% prediction intervals") + 
+  theme_minimal()
+```
+
+\newpage
+
+# Appendix
+
+##  Expanding Window cross-validation for hydro data
+```{r Expanding Window cross-validation}
+EWCV.logSARIMA <- function(data, p, d, q, P, D, Q, S) {
+  len <- nrow(data)
+  data.train.percent <- c(0.5, 0.6, 0.7, 0.8, 0.9)
+  i <- 1
+  MSE <- c()
+  for (percent in data.train.percent) {
+    num.train <- round(len * percent)
+    num.test <- num.train + 1
+    data.train <- data$Value[1:num.train]
+    data.test <- data$Value[num.test:len]
+    len.test <- length(data.test)
+    
+    model <- astsa::sarima(data.train, p, d, q, P, D, Q, S)
+    pred <- as.numeric(sarima.for(as.ts(log(data.train)), len.test, 
+                                  p, d, q, P, D, Q, S, plot = FALSE)$pred)
+    MSE[i] <- mean((data.test - exp(pred))^2)
+    i <- i + 1
+  }
+  return(mean(MSE))
+}
+```
+
+## Expanding Window cross-validation for stock data on standard GARCH
+```{r Expanding Window cross-validation for stock data GARCH}
+EWCV.GARCH <- function(data, formula) {
+  len <- nrow(data)
+  data.train.percent <- c(0.5, 0.6, 0.7, 0.8, 0.9)
+  i <- 1
+  MSE <- c()
+  for (percent in data.train.percent) {
+    num.train <- round(len * percent)
+    num.test <- num.train + 1
+    data.train <- data$Value[1:num.train]
+    data.test <- data$Value[num.test:len]
+    len.test <- length(data.test)
+    model <- garchFit(formula = formula, data = data.train, trace = FALSE)
+    pred <- predict(model, len.test)$meanForecast[1]
+    MSE[i] <- mean((data.test - pred)^2)
+    i <- i + 1
+  }
+  return(mean(MSE))
+}
+```
+
+## Expanding Window cross-validation for stock data on exponential GARCH
+```{r Expanding Window cross-validation for stock data eGARCH}
+EWCV.eGARCH <- function(data, spec) {
+  len <- nrow(data)
+  data.train.percent <- c(0.5, 0.6, 0.7, 0.8, 0.9)
+  i <- 1
+  MSE <- c()
+  for (percent in data.train.percent) {
+    num.train <- round(len * percent)
+    num.test <- num.train + 1
+    data.train <- data$Value[1:num.train]
+    data.test <- data$Value[num.test:len]
+    len.test <- length(data.test)
+    model <- rugarch::ugarchfit(spec, data = data.train)
+    pred <- as.numeric(fitted(rugarch::ugarchforecast(model, n.ahead = len.test)))
+    MSE[i] <- mean((data.test - pred)^2)
+    i <- i + 1
+  }
+  return(mean(MSE))
+}
+```
